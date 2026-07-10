@@ -6,6 +6,8 @@ import re
 from collections import Counter
 from typing import Iterable
 
+from imsg.reactions import REACTION_WORDS, is_reaction_message, strip_reaction_prefix
+
 # Common English stop words + iMessage noise.
 STOP_WORDS = frozenset(
     """
@@ -54,11 +56,27 @@ def normalize_text(text: str) -> str:
     return text.lower()
 
 
+def _analysis_text(text: str) -> str | None:
+    if is_reaction_message(text):
+        text = strip_reaction_prefix(text)
+        if not text or is_reaction_message(text):
+            return None
+    return text
+
+
 def tokenize(texts: Iterable[str]) -> list[str]:
     tokens: list[str] = []
     for text in texts:
-        for word in WORD_RE.findall(normalize_text(text)):
-            if word not in STOP_WORDS and not word.isdigit() and not is_garbage_word(word):
+        cleaned = _analysis_text(text)
+        if not cleaned:
+            continue
+        for word in WORD_RE.findall(normalize_text(cleaned)):
+            if (
+                word not in STOP_WORDS
+                and word not in REACTION_WORDS
+                and not word.isdigit()
+                and not is_garbage_word(word)
+            ):
                 tokens.append(word)
     return tokens
 

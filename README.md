@@ -39,3 +39,22 @@ IMESSAGE_DB_PATH=/path/to/chat.db python app.py
 ```
 
 Default path: `~/Library/Messages/chat.db`
+
+## Optional: merge exports from Google Cloud Storage
+
+If you store exported iMessage rows in GCS (JSON or JSONL), the app can merge per-person counts with your local database.
+
+```bash
+export GCS_BUCKET=your-bucket-name
+export GCS_PREFIX=imessage-exports/   # optional folder prefix
+export GOOGLE_APPLICATION_CREDENTIALS=/path/to/service-account.json
+python app.py
+```
+
+Each export file should contain rows like:
+
+```json
+{"handle": "+15551234567", "name": "Alex", "text": "hey!", "is_from_me": true, "date": "2024-06-01T12:00:00"}
+```
+
+When configured, `/api/contacts` and `/api/bubbles` automatically merge local + GCS stats. Use `?gcs=0` to disable merging. GCS-only stats are available at `/api/gcs/contacts`.

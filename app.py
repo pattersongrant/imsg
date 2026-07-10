@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from flask import Flask, jsonify, render_template, request
 
-from imsg import analyze, db
+from imsg import analyze, db, gcs
 from imsg.contacts import ContactDirectory
 
 app = Flask(__name__)
@@ -35,6 +35,34 @@ def _resolve_handle(conn, directory: ContactDirectory, identifier: str) -> str:
     return identifier
 
 
+def _load_contacts(conn, directory, *, include_groups: bool, merge_gcs: bool) -> list[dict]:
+    direct = db.contact_stats(conn, directory)
+    for row in direct:
+        row["is_group"] = False
+        row.setdefault("source", "local")
+    groups: list[dict] = []
+    combined = direct
+    if include_groups:
+        groups = db.group_chat_stats(conn, directory)
+        combined = sorted(direct + groups, key=lambda r: r["total"], reverse=True)
+    if merge_gcs and gcs.gcs_configured():
+        try:
+            remote = gcs.contact_stats_from_gcs()
+            combined = gcs.merge_contact_stats(
+                [r for r in combined if not r.get("is_group")],
+                remote,
+            )
+            if include_groups:
+                combined = sorted(
+                    combined + [g for g in groups if g.get("is_group")],
+                    key=lambda r: r["total"],
+                    reverse=True,
+                )
+        except (gcs.GCSConfigError, gcs.GCSUnavailableError) as exc:
+            raise db.DatabaseError(str(exc)) from exc
+    return combined
+
+
 def _serialize_rows(rows: list[dict]) -> list[dict]:
     for row in rows:
         if row.get("last_date"):
@@ -50,42 +78,56 @@ def index():
 @app.route("/api/status")
 def status():
     path = db.default_db_path()
+    payload = {"gcs": gcs.gcs_status()}
     try:
         conn, _ = _open()
         summary = db.database_summary(conn)
         conn.close()
-        return jsonify({"ok": True, "db_path": str(path), "summary": summary})
+        payload.update({"ok": True, "db_path": str(path), "summary": summary})
+        return jsonify(payload)
     except db.AccessDeniedError as exc:
-        return jsonify({"ok": False, "error": "permission", "message": str(exc), "db_path": str(path)}), 403
+        payload.update({"ok": False, "error": "permission", "message": str(exc), "db_path": str(path)})
+        return jsonify(payload), 403
     except db.DatabaseError as exc:
-        return jsonify({"ok": False, "error": "database", "message": str(exc), "db_path": str(path)}), 500
+        payload.update({"ok": False, "error": "database", "message": str(exc), "db_path": str(path)})
+        return jsonify(payload), 500
 
 
 @app.route("/api/contacts")
 def contacts():
     limit = min(int(request.args.get("limit", 50)), 200)
     include_groups = request.args.get("groups", "1") == "1"
+    merge_gcs = request.args.get("gcs", "1") == "1"
     try:
         conn, directory = _open()
-        direct = db.contact_stats(conn, directory)
-        for row in direct:
-            row["is_group"] = False
-        combined = direct
-        if include_groups:
-            groups = db.group_chat_stats(conn, directory)
-            combined = sorted(direct + groups, key=lambda r: r["total"], reverse=True)
+        combined = _load_contacts(
+            conn, directory, include_groups=include_groups, merge_gcs=merge_gcs
+        )
         conn.close()
         return jsonify({"contacts": _serialize_rows(combined[:limit])})
     except (db.AccessDeniedError, db.DatabaseError) as exc:
         return jsonify({"ok": False, "message": str(exc)}), 403
 
 
+@app.route("/api/gcs/contacts")
+def gcs_contacts():
+    limit = min(int(request.args.get("limit", 50)), 200)
+    try:
+        rows = gcs.contact_stats_from_gcs()
+        return jsonify({"contacts": _serialize_rows(rows[:limit]), "source": "gcs"})
+    except (gcs.GCSConfigError, gcs.GCSUnavailableError) as exc:
+        return jsonify({"ok": False, "message": str(exc)}), 400
+    except Exception as exc:
+        return jsonify({"ok": False, "message": str(exc)}), 500
+
+
 @app.route("/api/bubbles")
 def bubbles():
     limit = min(int(request.args.get("limit", 30)), 60)
+    merge_gcs = request.args.get("gcs", "1") == "1"
     try:
         conn, directory = _open()
-        people = db.contact_stats(conn, directory)[:limit]
+        people = _load_contacts(conn, directory, include_groups=False, merge_gcs=merge_gcs)[:limit]
         conn.close()
         payload = [
             {

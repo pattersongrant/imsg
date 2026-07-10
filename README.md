@@ -39,3 +39,27 @@ IMESSAGE_DB_PATH=/path/to/chat.db python app.py
 ```
 
 Default path: `~/Library/Messages/chat.db`
+
+## Optional: auto-index from Google Cloud Storage
+
+If you sync `chat.db` backups (or JSON exports) to GCS, the app **automatically indexes them on startup** and merges them into contacts, topics, and keywords. No manual export step is required if you upload `chat.db` files.
+
+```bash
+export GCS_BUCKET=your-bucket-name
+export GCS_PREFIX=imessage-backups/   # optional folder prefix
+export GOOGLE_APPLICATION_CREDENTIALS=/path/to/service-account.json
+python app.py
+```
+
+Supported files in the bucket:
+- `chat.db` — full iMessage database backups (recommended)
+- `.json` / `.jsonl` — optional row exports
+
+The index refreshes every 15 minutes by default (`GCS_REFRESH_SECONDS=900`). Set `GCS_REFRESH_SECONDS=0` to only index at startup.
+
+When configured, local stats plus GCS data are merged automatically in:
+- Top Contacts and People Map
+- Topics tab (per-person keywords)
+- Contact drill-down top words
+
+Use `?gcs=0` on API calls to disable merging. GCS-only stats: `/api/gcs/contacts`.

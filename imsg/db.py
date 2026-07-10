@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Iterator
 
 from imsg.contacts import ContactDirectory
+from imsg.reactions import is_reaction_message
 
 APPLE_EPOCH = datetime(2001, 1, 1)
 DEFAULT_DB_PATH = Path.home() / "Library" / "Messages" / "chat.db"
@@ -141,13 +142,27 @@ def decode_attributed_body(blob: bytes | None) -> str | None:
 
 
 def message_text(row: sqlite3.Row) -> str | None:
+    associated_type = None
+    try:
+        if "associated_message_type" in row.keys():
+            associated_type = row["associated_message_type"]
+    except Exception:
+        associated_type = None
+
     text = row["text"]
     if text and str(text).strip():
         cleaned = str(text).strip()
-        return cleaned if looks_like_message_text(cleaned) else None
+        if not looks_like_message_text(cleaned):
+            return None
+        if is_reaction_message(cleaned, associated_message_type=associated_type):
+            return None
+        return cleaned
     body = row["attributedBody"]
     if body:
-        return decode_attributed_body(body if isinstance(body, bytes) else bytes(body))
+        decoded = decode_attributed_body(body if isinstance(body, bytes) else bytes(body))
+        if decoded and is_reaction_message(decoded, associated_message_type=associated_type):
+            return None
+        return decoded
     return None
 
 
@@ -179,6 +194,21 @@ _DM_CHAT_SQL = """
 """
 
 _MESSAGE_FILTER = "(m.text IS NOT NULL OR m.attributedBody IS NOT NULL)"
+_REACTION_FILTER = (
+    "(m.associated_message_type IS NULL OR m.associated_message_type = 0 "
+    "OR m.associated_message_type < 2000 OR m.associated_message_type > 3006)"
+)
+
+
+def _message_columns(conn: sqlite3.Connection) -> set[str]:
+    return {row[1] for row in conn.execute("PRAGMA table_info(message)")}
+
+
+def _content_filter(conn: sqlite3.Connection) -> str:
+    parts = [_MESSAGE_FILTER, _REACTION_FILTER]
+    if "associated_message_type" not in _message_columns(conn):
+        parts = [_MESSAGE_FILTER]
+    return " AND ".join(f"({part})" for part in parts)
 
 
 def _dm_chat_cte() -> str:
@@ -202,7 +232,7 @@ def iter_messages(
 ) -> Iterator[Message]:
     """Yield messages with resolved contact and chat metadata."""
     params: list[object] = []
-    where_parts = [_MESSAGE_FILTER]
+    where_parts = [_content_filter(conn)]
 
     if contact:
         where_parts.append(
@@ -280,7 +310,7 @@ def contact_stats(conn: sqlite3.Connection, directory: ContactDirectory | None =
         JOIN handle h ON d.handle_id = h.ROWID
         JOIN chat_message_join cmj ON cmj.chat_id = d.chat_id
         JOIN message m ON cmj.message_id = m.ROWID
-        WHERE {_MESSAGE_FILTER}
+        WHERE {_content_filter(conn)}
         GROUP BY h.ROWID
         ORDER BY total DESC
     """
@@ -304,7 +334,7 @@ def group_chat_stats(conn: sqlite3.Connection, directory: ContactDirectory | Non
     """Per-group-chat message counts."""
     if not _has_table(conn, "chat"):
         return []
-    sql = """
+    sql = f"""
         SELECT
             COALESCE(NULLIF(c.display_name, ''), c.chat_identifier) AS contact,
             c.chat_identifier,
@@ -316,7 +346,7 @@ def group_chat_stats(conn: sqlite3.Connection, directory: ContactDirectory | Non
         FROM chat c
         JOIN chat_message_join cmj ON cmj.chat_id = c.ROWID
         JOIN message m ON cmj.message_id = m.ROWID
-        WHERE (m.text IS NOT NULL OR m.attributedBody IS NOT NULL)
+        WHERE {_content_filter(conn)}
         GROUP BY c.ROWID
         HAVING participants > 1
         ORDER BY total DESC
@@ -341,10 +371,10 @@ def group_chat_stats(conn: sqlite3.Connection, directory: ContactDirectory | Non
 
 
 def monthly_activity(conn: sqlite3.Connection) -> list[dict]:
-    sql = """
+    sql = f"""
         SELECT m.date
         FROM message m
-        WHERE m.text IS NOT NULL OR m.attributedBody IS NOT NULL
+        WHERE {_content_filter(conn)}
     """
     buckets: dict[str, int] = {}
     for (raw_date,) in conn.execute(sql):
@@ -399,7 +429,7 @@ def messages_for_contact(
 
 def database_summary(conn: sqlite3.Connection) -> dict:
     total = conn.execute(
-        "SELECT COUNT(*) FROM message WHERE text IS NOT NULL OR attributedBody IS NOT NULL"
+        f"SELECT COUNT(*) FROM message m WHERE {_content_filter(conn)}"
     ).fetchone()[0]
     handles = conn.execute("SELECT COUNT(*) FROM handle").fetchone()[0]
     chats = conn.execute("SELECT COUNT(*) FROM chat").fetchone()[0] if _has_table(conn, "chat") else 0

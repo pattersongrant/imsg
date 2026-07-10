@@ -113,6 +113,24 @@ class TestDatabaseReactions:
         stats = db.contact_stats(conn)
         assert stats[0]["total"] == 2
 
+    def test_group_chat_stats_sql(self):
+        conn = self._make_db()
+        conn.execute("INSERT INTO handle (ROWID, id) VALUES (2, '+15559876543')")
+        conn.execute(
+            """
+            INSERT INTO chat (ROWID, chat_identifier, display_name)
+            VALUES (2, 'group-chat', 'Friends')
+            """
+        )
+        conn.execute("INSERT INTO chat_handle_join (chat_id, handle_id) VALUES (2, 1), (2, 2)")
+        self._insert_message(conn, 10, "hello group", 0)
+        conn.execute("INSERT INTO chat_message_join (chat_id, message_id) VALUES (2, 10)")
+
+        stats = db.group_chat_stats(conn)
+        assert len(stats) == 1
+        assert stats[0]["contact"] == "Friends"
+        assert stats[0]["total"] == 1
+
     def test_reaction_rows_excluded_from_iter_messages(self):
         conn = self._make_db()
         self._insert_message(conn, 1, "real message", 0)

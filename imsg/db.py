@@ -334,7 +334,7 @@ def group_chat_stats(conn: sqlite3.Connection, directory: ContactDirectory | Non
     """Per-group-chat message counts."""
     if not _has_table(conn, "chat"):
         return []
-    sql = """
+    sql = f"""
         SELECT
             COALESCE(NULLIF(c.display_name, ''), c.chat_identifier) AS contact,
             c.chat_identifier,

@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>iMessage Insights</title>
+  <link rel="stylesheet" href="/static/style.css" />
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/d3@7/dist/d3.min.js"></script>
+</head>
+<body>
+  <header class="header">
+    <div class="header-inner">
+      <div class="header-top">
+        <div>
+          <h1>iMessage Insights</h1>
+          <p class="subtitle">Who you text most — and what you talk about. Everything stays on your Mac.</p>
+        </div>
+        <label class="anon-toggle" title="Hide names, numbers, and message text for safe previews">
+          <input type="checkbox" id="anonymous-toggle" />
+          <span class="anon-switch"></span>
+          <span class="anon-label">Anonymous preview</span>
+        </label>
+      </div>
+    </div>
+  </header>
+
+  <main class="container">
+    <section id="status-banner" class="banner hidden"></section>
+    <section id="anon-banner" class="banner anon-banner hidden">
+      <strong>Anonymous preview</strong> — names, numbers, and message text are hidden. Counts are rounded.
+    </section>
+
+    <section class="stats-row" id="summary-stats"></section>
+
+    <nav class="tabs">
+      <button class="tab active" data-tab="contacts">Top Contacts</button>
+      <button class="tab" data-tab="bubbles">People Map</button>
+      <button class="tab" data-tab="topics">Topics</button>
+      <button class="tab" data-tab="activity">Activity</button>
+    </nav>
+
+    <section id="tab-contacts" class="tab-panel active">
+      <div class="panel-grid">
+        <div class="card">
+          <h2>Most messaged</h2>
+          <div id="contacts-list" class="contacts-list"></div>
+        </div>
+        <div class="card card-detail" id="contact-detail">
+          <h2 id="detail-title">Select a contact</h2>
+          <div id="detail-content" class="detail-placeholder">
+            Click someone in the list to see their top words and recent messages.
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="tab-bubbles" class="tab-panel">
+      <div class="card">
+        <h2>Who you text most</h2>
+        <p class="hint">Circle size = DM message count (1:1 only). Click a circle for details.</p>
+        <div id="bubble-chart" class="bubble-chart"></div>
+      </div>
+    </section>
+
+    <section id="tab-topics" class="tab-panel">
+      <div class="card">
+        <h2>What you talk about</h2>
+        <p class="hint">Top words from your most active conversations.</p>
+        <div id="topics-overall" class="tag-cloud"></div>
+      </div>
+      <div id="topics-by-contact" class="topics-grid"></div>
+    </section>
+
+    <section id="tab-activity" class="tab-panel">
+      <div class="card">
+        <h2>Messages over time</h2>
+        <canvas id="activity-chart" height="100"></canvas>
+      </div>
+    </section>
+  </main>
+
+  <footer class="footer">
+    <span>Local only · reads ~/Library/Messages/chat.db</span>
+  </footer>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

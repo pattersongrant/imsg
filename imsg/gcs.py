@@ -1,13 +1,17 @@
-"""Index exported iMessage rows from Google Cloud Storage."""
+"""Index iMessage data from Google Cloud Storage."""
 
 from __future__ import annotations
 
 import json
 import os
-from collections import defaultdict
+import tempfile
+import threading
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Iterator
+
+from imsg.contacts import ContactDirectory
 
 try:
     from google.cloud import storage
@@ -44,6 +48,21 @@ class GCSContactStats:
     texts: list[str] = field(default_factory=list)
 
 
+@dataclass
+class GCSIndex:
+    contacts: list[dict] = field(default_factory=list)
+    texts_by_handle: dict[str, list[str]] = field(default_factory=dict)
+    loaded_at: datetime | None = None
+    files_indexed: int = 0
+    db_files: int = 0
+    json_files: int = 0
+    error: str | None = None
+
+
+_index_cache: GCSIndex | None = None
+_index_lock = threading.Lock()
+
+
 def gcs_configured() -> bool:
     return bool(os.environ.get("GCS_BUCKET", "").strip())
 
@@ -67,13 +86,20 @@ def _prefix() -> str:
     return os.environ.get("GCS_PREFIX", "").strip()
 
 
+def _refresh_seconds() -> int:
+    raw = os.environ.get("GCS_REFRESH_SECONDS", "900").strip()
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        return 900
+
+
 def _parse_date(value: Any) -> datetime | None:
     if value is None:
         return None
     if isinstance(value, datetime):
         return value
     if isinstance(value, (int, float)):
-        # Unix timestamp seconds or milliseconds.
         seconds = float(value)
         if seconds > 1e12:
             seconds /= 1000.0
@@ -187,30 +213,175 @@ def aggregate_messages(messages: list[GCSMessage]) -> list[GCSContactStats]:
     return sorted(by_handle.values(), key=lambda s: s.total, reverse=True)
 
 
-def list_export_blobs(client: Any, bucket_name: str, prefix: str) -> list[Any]:
+def _stats_to_contacts(stats: list[GCSContactStats]) -> tuple[list[dict], dict[str, list[str]]]:
+    contacts: list[dict] = []
+    texts_by_handle: dict[str, list[str]] = {}
+    for item in stats:
+        contacts.append(
+            {
+                "handle": item.handle,
+                "contact": item.handle,
+                "name": item.name or item.handle,
+                "display": item.name or item.handle,
+                "total": item.total,
+                "sent": item.sent,
+                "received": item.received,
+                "last_date": item.last_date,
+                "source": "gcs",
+                "is_group": False,
+            }
+        )
+        texts_by_handle[item.handle] = list(item.texts)
+    return contacts, texts_by_handle
+
+
+def _merge_stats(existing: dict[str, GCSContactStats], incoming: list[GCSContactStats]) -> None:
+    for item in incoming:
+        stats = existing.get(item.handle)
+        if not stats:
+            existing[item.handle] = GCSContactStats(
+                handle=item.handle,
+                name=item.name,
+                total=item.total,
+                sent=item.sent,
+                received=item.received,
+                last_date=item.last_date,
+                texts=list(item.texts),
+            )
+            continue
+        if item.name and not stats.name:
+            stats.name = item.name
+        stats.total += item.total
+        stats.sent += item.sent
+        stats.received += item.received
+        if item.last_date and (stats.last_date is None or item.last_date > stats.last_date):
+            stats.last_date = item.last_date
+        stats.texts.extend(item.texts)
+
+
+def index_chat_db(db_path: Path, *, text_limit: int = 800) -> list[GCSContactStats]:
+    """Index a chat.db file the same way the local app does."""
+    from imsg import db
+
+    conn = db.connect(db_path)
+    directory = ContactDirectory(conn)
+    stats: list[GCSContactStats] = []
+    try:
+        for row in db.contact_stats(conn, directory):
+            handle = row["handle"]
+            texts = db.messages_for_contact(conn, handle, limit=text_limit, dm_only=True)
+            stats.append(
+                GCSContactStats(
+                    handle=handle,
+                    name=row.get("name") or row.get("display"),
+                    total=row["total"],
+                    sent=row["sent"],
+                    received=row["received"],
+                    last_date=row.get("last_date"),
+                    texts=texts,
+                )
+            )
+    finally:
+        conn.close()
+    return stats
+
+
+def list_index_blobs(client: Any, bucket_name: str, prefix: str) -> list[Any]:
     bucket = client.bucket(bucket_name)
-    suffixes = (".json", ".jsonl", ".ndjson")
+    json_suffixes = (".json", ".jsonl", ".ndjson")
     blobs = []
     for blob in bucket.list_blobs(prefix=prefix or None):
         name = blob.name.lower()
-        if name.endswith(suffixes):
+        if name.endswith(json_suffixes) or name.endswith(".db"):
             blobs.append(blob)
     return blobs
 
 
-def load_messages_from_gcs(
+def build_index(
     *,
     bucket: str | None = None,
     prefix: str | None = None,
-) -> list[GCSMessage]:
+) -> GCSIndex:
+    """Download and index all supported files from GCS."""
     _require_storage()
+    from imsg import db as imsg_db
+
     bucket_name = bucket or _bucket_name()
     blob_prefix = _prefix() if prefix is None else prefix
     client = storage.Client()
-    messages: list[GCSMessage] = []
-    for blob in list_export_blobs(client, bucket_name, blob_prefix):
-        messages.extend(parse_export_bytes(blob.download_as_bytes()))
-    return messages
+
+    combined: dict[str, GCSContactStats] = {}
+    db_files = 0
+    json_files = 0
+    files_indexed = 0
+
+    for blob in list_index_blobs(client, bucket_name, blob_prefix):
+        name = blob.name.lower()
+        temp_path: Path | None = None
+        try:
+            if name.endswith(".db"):
+                fd, temp_name = tempfile.mkstemp(suffix=".db")
+                os.close(fd)
+                temp_path = Path(temp_name)
+                blob.download_to_filename(temp_path)
+                _merge_stats(combined, index_chat_db(temp_path))
+                db_files += 1
+            else:
+                messages = parse_export_bytes(blob.download_as_bytes())
+                _merge_stats(combined, aggregate_messages(messages))
+                json_files += 1
+            files_indexed += 1
+        except (imsg_db.DatabaseError, OSError, ValueError):
+            continue
+        finally:
+            if temp_path and temp_path.exists():
+                temp_path.unlink(missing_ok=True)
+
+    stats = sorted(combined.values(), key=lambda s: s.total, reverse=True)
+    contacts, texts_by_handle = _stats_to_contacts(stats)
+    return GCSIndex(
+        contacts=contacts,
+        texts_by_handle=texts_by_handle,
+        loaded_at=datetime.now(timezone.utc),
+        files_indexed=files_indexed,
+        db_files=db_files,
+        json_files=json_files,
+    )
+
+
+def get_index(*, force: bool = False) -> GCSIndex | None:
+    """Return the cached GCS index, building it on first use."""
+    if not gcs_configured():
+        return None
+    global _index_cache
+    with _index_lock:
+        stale = False
+        if _index_cache and _index_cache.loaded_at and _refresh_seconds() > 0:
+            age = (datetime.now(timezone.utc) - _index_cache.loaded_at).total_seconds()
+            stale = age >= _refresh_seconds()
+        if _index_cache is None or force or stale:
+            try:
+                _index_cache = build_index()
+            except Exception as exc:
+                _index_cache = GCSIndex(error=str(exc))
+        return _index_cache
+
+
+def ensure_index(*, background: bool = False) -> None:
+    """Warm the GCS index on startup."""
+    if not gcs_configured():
+        return
+
+    def _run() -> None:
+        try:
+            get_index(force=True)
+        except Exception:
+            pass
+
+    if background:
+        threading.Thread(target=_run, daemon=True).start()
+    else:
+        _run()
 
 
 def contact_stats_from_gcs(
@@ -218,24 +389,33 @@ def contact_stats_from_gcs(
     bucket: str | None = None,
     prefix: str | None = None,
 ) -> list[dict]:
-    messages = load_messages_from_gcs(bucket=bucket, prefix=prefix)
-    rows: list[dict] = []
-    for stats in aggregate_messages(messages):
-        rows.append(
-            {
-                "handle": stats.handle,
-                "contact": stats.handle,
-                "name": stats.name or stats.handle,
-                "display": stats.name or stats.handle,
-                "total": stats.total,
-                "sent": stats.sent,
-                "received": stats.received,
-                "last_date": stats.last_date,
-                "source": "gcs",
-                "is_group": False,
-            }
-        )
-    return rows
+    if not gcs_configured() and bucket is None and prefix is None:
+        raise GCSConfigError("Set GCS_BUCKET to the export bucket name.")
+    if bucket or prefix is not None:
+        index = build_index(bucket=bucket, prefix=prefix)
+    else:
+        index = get_index(force=True)
+    if index is None:
+        return []
+    if index.error:
+        raise GCSUnavailableError(index.error)
+    return list(index.contacts)
+
+
+def texts_for_handle(handle: str, *, limit: int = 800) -> list[str]:
+    index = get_index()
+    if not index:
+        return []
+    texts = index.texts_by_handle.get(handle, [])
+    return texts[:limit]
+
+
+def merge_texts(local: list[str], remote: list[str], *, limit: int = 800) -> list[str]:
+    if not remote:
+        return local[:limit]
+    if not local:
+        return remote[:limit]
+    return (local + remote)[:limit]
 
 
 def merge_contact_stats(local: list[dict], remote: list[dict]) -> list[dict]:
@@ -267,6 +447,9 @@ def merge_contact_stats(local: list[dict], remote: list[dict]) -> list[dict]:
             remote_last = row.get("last_date")
             if remote_last and (not local_last or remote_last > local_last):
                 item["last_date"] = remote_last
+            if row.get("name") and item.get("name") in (None, item.get("handle")):
+                item["name"] = row["name"]
+                item["display"] = row.get("display") or row["name"]
             item["source"] = "merged"
             sources = set(item.get("sources") or ["local"])
             sources.add("gcs")
@@ -282,21 +465,39 @@ def merge_contact_stats(local: list[dict], remote: list[dict]) -> list[dict]:
 
 def gcs_status() -> dict:
     if not gcs_configured():
-        return {"configured": False, "available": storage is not None}
+        return {"configured": False, "available": storage is not None, "auto_index": False}
     status = {
         "configured": True,
         "available": storage is not None,
+        "auto_index": True,
         "bucket": os.environ.get("GCS_BUCKET", ""),
         "prefix": _prefix(),
+        "refresh_seconds": _refresh_seconds(),
     }
     if storage is None:
         status["error"] = "google-cloud-storage not installed"
         return status
+
+    index = get_index()
+    if index is None:
+        return status
+    if index.error:
+        status["error"] = index.error
+        return status
+
+    status.update(
+        {
+            "files_indexed": index.files_indexed,
+            "db_files": index.db_files,
+            "json_files": index.json_files,
+            "contacts_indexed": len(index.contacts),
+            "loaded_at": index.loaded_at.isoformat() if index.loaded_at else None,
+        }
+    )
     try:
         client = storage.Client()
-        bucket = client.bucket(status["bucket"])
-        blobs = list_export_blobs(client, status["bucket"], status["prefix"])
-        status["export_files"] = len(blobs)
+        blobs = list_index_blobs(client, status["bucket"], status["prefix"])
+        status["index_files"] = len(blobs)
     except Exception as exc:  # pragma: no cover - network/credentials dependent
         status["error"] = str(exc)
     return status

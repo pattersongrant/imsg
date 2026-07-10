@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import os
+
 from flask import Flask, jsonify, render_template, request
 
 from imsg import analyze, db, gcs
@@ -21,7 +23,18 @@ def _resolve_contact(conn, directory: ContactDirectory, identifier: str) -> dict
     if group:
         return {"kind": "group", "id": group["id"], "display": group["display"]}
     handle = _resolve_handle(conn, directory, identifier)
-    return {"kind": "dm", "id": handle, "display": directory.name_for(handle)}
+    display = directory.name_for(handle)
+    if handle == identifier and display == identifier:
+        index = gcs.get_index()
+        if index:
+            for row in index.contacts:
+                if row["handle"] == identifier or row.get("display") == identifier:
+                    return {
+                        "kind": "dm",
+                        "id": row["handle"],
+                        "display": row.get("display") or row.get("name") or row["handle"],
+                    }
+    return {"kind": "dm", "id": handle, "display": display}
 
 
 def _resolve_handle(conn, directory: ContactDirectory, identifier: str) -> str:
@@ -35,6 +48,13 @@ def _resolve_handle(conn, directory: ContactDirectory, identifier: str) -> str:
     return identifier
 
 
+def _gcs_contacts() -> list[dict]:
+    index = gcs.get_index()
+    if not index or index.error:
+        return []
+    return list(index.contacts)
+
+
 def _load_contacts(conn, directory, *, include_groups: bool, merge_gcs: bool) -> list[dict]:
     direct = db.contact_stats(conn, directory)
     for row in direct:
@@ -46,8 +66,8 @@ def _load_contacts(conn, directory, *, include_groups: bool, merge_gcs: bool) ->
         groups = db.group_chat_stats(conn, directory)
         combined = sorted(direct + groups, key=lambda r: r["total"], reverse=True)
     if merge_gcs and gcs.gcs_configured():
-        try:
-            remote = gcs.contact_stats_from_gcs()
+        remote = _gcs_contacts()
+        if remote:
             combined = gcs.merge_contact_stats(
                 [r for r in combined if not r.get("is_group")],
                 remote,
@@ -58,9 +78,23 @@ def _load_contacts(conn, directory, *, include_groups: bool, merge_gcs: bool) ->
                     key=lambda r: r["total"],
                     reverse=True,
                 )
-        except (gcs.GCSConfigError, gcs.GCSUnavailableError) as exc:
-            raise db.DatabaseError(str(exc)) from exc
     return combined
+
+
+def _contact_texts(
+    conn,
+    *,
+    handle: str,
+    is_group: bool,
+    limit: int = 800,
+    merge_gcs: bool = True,
+) -> list[str]:
+    texts: list[str] = []
+    if not is_group:
+        texts = db.messages_for_contact(conn, handle, limit=limit, dm_only=True)
+    if merge_gcs and gcs.gcs_configured():
+        texts = gcs.merge_texts(texts, gcs.texts_for_handle(handle, limit=limit), limit=limit)
+    return texts
 
 
 def _serialize_rows(rows: list[dict]) -> list[dict]:
@@ -158,13 +192,14 @@ def activity():
 
 @app.route("/api/contact/<path:contact_id>")
 def contact_detail(contact_id: str):
+    merge_gcs = request.args.get("gcs", "1") == "1"
     try:
         conn, directory = _open()
         resolved = _resolve_contact(conn, directory, contact_id)
         is_group = resolved["kind"] == "group"
         lookup_id = resolved["id"]
-        texts = db.messages_for_contact(
-            conn, lookup_id, limit=800, dm_only=not is_group
+        texts = _contact_texts(
+            conn, handle=lookup_id, is_group=is_group, limit=800, merge_gcs=merge_gcs
         )
         topics = analyze.summarize_topics(texts)
         recent = []
@@ -196,15 +231,20 @@ def contact_detail(contact_id: str):
 @app.route("/api/topics")
 def global_topics():
     limit_contacts = min(int(request.args.get("top", 10)), 30)
+    merge_gcs = request.args.get("gcs", "1") == "1"
     try:
         conn, directory = _open()
-        all_contacts = db.contact_stats(conn, directory)
-        top = all_contacts[:limit_contacts]
+        all_contacts = _load_contacts(
+            conn, directory, include_groups=False, merge_gcs=merge_gcs
+        )
+        top = [row for row in all_contacts if not row.get("is_group")][:limit_contacts]
         per_contact = []
         all_texts: list[str] = []
         for row in top:
             handle = row["handle"]
-            texts = db.messages_for_contact(conn, handle, limit=400, dm_only=True)
+            texts = _contact_texts(
+                conn, handle=handle, is_group=False, limit=400, merge_gcs=merge_gcs
+            )
             all_texts.extend(texts)
             per_contact.append(
                 {
@@ -225,6 +265,9 @@ def global_topics():
 def main():
     print("iMessage Insights")
     print(f"Database: {db.default_db_path()}")
+    if gcs.gcs_configured():
+        print(f"GCS indexing: bucket={os.environ.get('GCS_BUCKET')} (auto on startup)")
+        gcs.ensure_index(background=True)
     print("Open http://127.0.0.1:5050")
     app.run(host="127.0.0.1", port=5050, debug=False)
 

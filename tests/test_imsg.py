@@ -206,10 +206,60 @@ class TestGCS:
         status = gcs.gcs_status()
         assert status["configured"] is False
 
+    def test_merge_texts(self):
+        merged = gcs.merge_texts(["local one"], ["remote two"], limit=10)
+        assert merged == ["local one", "remote two"]
+
+    def test_index_chat_db(self, tmp_path):
+        path = tmp_path / "chat.db"
+        tmp = sqlite3.connect(path)
+        tmp.row_factory = sqlite3.Row
+        tmp.executescript(
+            """
+            CREATE TABLE handle (ROWID INTEGER PRIMARY KEY, id TEXT NOT NULL);
+            CREATE TABLE chat (ROWID INTEGER PRIMARY KEY, chat_identifier TEXT, display_name TEXT);
+            CREATE TABLE chat_handle_join (chat_id INTEGER, handle_id INTEGER);
+            CREATE TABLE chat_message_join (chat_id INTEGER, message_id INTEGER);
+            CREATE TABLE message (
+                ROWID INTEGER PRIMARY KEY, text TEXT, attributedBody BLOB,
+                is_from_me INTEGER, date INTEGER, handle_id INTEGER,
+                associated_message_type INTEGER
+            );
+            """
+        )
+        tmp.execute("INSERT INTO handle (ROWID, id) VALUES (1, '+15551234567')")
+        tmp.execute(
+            "INSERT INTO chat (ROWID, chat_identifier, display_name) VALUES (1, '+15551234567', 'Alex')"
+        )
+        tmp.execute("INSERT INTO chat_handle_join (chat_id, handle_id) VALUES (1, 1)")
+        tmp.execute(
+            """
+            INSERT INTO message (ROWID, text, is_from_me, date, handle_id, associated_message_type)
+            VALUES (1, 'hello from db', 1, 700000000, 1, 0)
+            """
+        )
+        tmp.execute("INSERT INTO chat_message_join (chat_id, message_id) VALUES (1, 1)")
+        tmp.commit()
+        tmp.close()
+
+        stats = gcs.index_chat_db(path)
+        assert len(stats) == 1
+        assert stats[0].texts == ["hello from db"]
+
+    def test_texts_for_handle_uses_cache(self, monkeypatch):
+        monkeypatch.setenv("GCS_BUCKET", "demo-bucket")
+        gcs._index_cache = gcs.GCSIndex(
+            texts_by_handle={"+15551234567": ["cached message"]},
+            contacts=[{"handle": "+15551234567", "total": 1}],
+        )
+        assert gcs.texts_for_handle("+15551234567") == ["cached message"]
+        gcs._index_cache = None
+
 
 class TestFlaskAPI:
     def test_gcs_contacts_requires_bucket(self, monkeypatch):
         monkeypatch.delenv("GCS_BUCKET", raising=False)
+        gcs._index_cache = None
         from app import app
 
         client = app.test_client()
@@ -219,6 +269,7 @@ class TestFlaskAPI:
 
     def test_status_includes_gcs_block(self, monkeypatch):
         monkeypatch.delenv("GCS_BUCKET", raising=False)
+        gcs._index_cache = None
         from app import app
 
         client = app.test_client()

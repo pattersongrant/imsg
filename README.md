@@ -17,7 +17,6 @@ Without Full Disk Access, macOS blocks reads of `~/Library/Messages/chat.db`.
 ## Quick start
 
 ```bash
-cd /Users/grantpatterson/Projects/imsg
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt

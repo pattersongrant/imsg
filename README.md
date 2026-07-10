@@ -1,10 +1,8 @@
 # iMessage Insights
-App Screenshots:
+A local web app that analyzes your Mac's iMessage database to show who you text the most and what you talk about.
 <img width="942" height="801" alt="Screenshot 2026-07-10 at 12 59 49 AM" src="https://github.com/user-attachments/assets/b7fd6e29-aaed-4cb3-9fbf-7bd68aa5acb1" />
 <img width="832" height="487" alt="Screenshot 2026-07-10 at 12 59 56 AM" src="https://github.com/user-attachments/assets/f6b561a5-c0d4-4bff-bbdc-d61ddcd805db" />
 
-
-A local web app that analyzes your Mac's iMessage database to show who you text the most and what you talk about.
 
 **All processing happens on your machine.** Nothing is uploaded or sent anywhere.
 

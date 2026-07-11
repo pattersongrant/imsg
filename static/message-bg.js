@@ -106,7 +106,29 @@
       angle: (Math.random() - 0.5) * 0.25,
       va: (Math.random() - 0.5) * 0.004,
       opacity: 0.32 + Math.random() * 0.38,
+      pop: 0,
     };
+  }
+
+  const BACKGROUND_BLOCK =
+    "button, input, select, textarea, label, a, .tab, .card, .contact-row, " +
+    ".anon-toggle, .drop-msg-btn, .stat-card, .banner, .messages-list, .tag, " +
+    ".timeline-overlay, .timeline-chart, .bubble-chart, #activity-chart, nav";
+
+  function isBackgroundClick(target) {
+    return target instanceof Element && !target.closest(BACKGROUND_BLOCK);
+  }
+
+  function popMessageAt(x, y) {
+    const b = createBubble(x, y, pickMessage());
+    const angle = Math.random() * Math.PI * 2;
+    const speed = reducedMotion ? 0.6 : 2.2 + Math.random() * 2.8;
+    b.vx = Math.cos(angle) * speed;
+    b.vy = Math.sin(angle) * speed;
+    b.pop = 1;
+    b.opacity = Math.min(0.9, b.opacity + 0.28);
+    bubbles.push(b);
+    while (bubbles.length > 95) bubbles.shift();
   }
 
   function bubbleCount() {
@@ -177,6 +199,10 @@
     ctx.save();
     ctx.translate(b.x, b.y);
     ctx.rotate(b.angle);
+    if (b.pop > 0) {
+      const scale = 0.2 + (1 - b.pop) * 0.8;
+      ctx.scale(scale, scale);
+    }
     ctx.globalAlpha = b.opacity;
 
     const r = Math.min(18, b.h / 2);
@@ -294,6 +320,10 @@
       b.angle += b.va;
       b.angle = Math.max(-0.4, Math.min(0.4, b.angle));
 
+      if (b.pop > 0) {
+        b.pop = Math.max(0, b.pop - (reducedMotion ? 0.18 : 0.09));
+      }
+
       keepInBounds(b);
     }
 
@@ -367,24 +397,8 @@
   function onPointerDown(e) {
     mouseX = e.clientX;
     mouseY = e.clientY;
-    if (reducedMotion) return;
-
-    for (const b of bubbles) {
-      const dx = b.x - mouseX;
-      const dy = b.y - mouseY;
-      const dist = Math.hypot(dx, dy);
-      if (dist < 160 && dist > 1) {
-        const force = 3.5;
-        b.vx += (dx / dist) * force;
-        b.vy += (dy / dist) * force;
-      }
-    }
-
-    if (bubbles.length < 65 && Math.random() < 0.35) {
-      bubbles.push(createBubble(
-        mouseX + (Math.random() - 0.5) * 40,
-        mouseY + (Math.random() - 0.5) * 40
-      ));
+    if (isBackgroundClick(e.target)) {
+      popMessageAt(e.clientX, e.clientY);
     }
   }
 

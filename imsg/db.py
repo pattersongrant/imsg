@@ -279,7 +279,12 @@ def iter_messages(
         {limit_sql}
     """
 
+    seen_rowids: set[int] = set()
     for row in conn.execute(sql, params):
+        rowid = row["rowid"]
+        if rowid in seen_rowids:
+            continue
+        seen_rowids.add(rowid)
         txt = message_text(row)
         if not txt:
             continue
@@ -302,9 +307,9 @@ def contact_stats(conn: sqlite3.Connection, directory: ContactDirectory | None =
         WITH {_dm_chat_cte()}
         SELECT
             h.id AS handle,
-            COUNT(*) AS total,
-            SUM(CASE WHEN m.is_from_me = 1 THEN 1 ELSE 0 END) AS sent,
-            SUM(CASE WHEN m.is_from_me = 0 THEN 1 ELSE 0 END) AS received,
+            COUNT(DISTINCT m.ROWID) AS total,
+            COUNT(DISTINCT CASE WHEN m.is_from_me = 1 THEN m.ROWID END) AS sent,
+            COUNT(DISTINCT CASE WHEN m.is_from_me = 0 THEN m.ROWID END) AS received,
             MAX(m.date) AS last_date
         FROM dm_chat d
         JOIN handle h ON d.handle_id = h.ROWID
@@ -338,9 +343,9 @@ def group_chat_stats(conn: sqlite3.Connection, directory: ContactDirectory | Non
         SELECT
             COALESCE(NULLIF(c.display_name, ''), c.chat_identifier) AS contact,
             c.chat_identifier,
-            COUNT(*) AS total,
-            SUM(CASE WHEN m.is_from_me = 1 THEN 1 ELSE 0 END) AS sent,
-            SUM(CASE WHEN m.is_from_me = 0 THEN 1 ELSE 0 END) AS received,
+            COUNT(DISTINCT m.ROWID) AS total,
+            COUNT(DISTINCT CASE WHEN m.is_from_me = 1 THEN m.ROWID END) AS sent,
+            COUNT(DISTINCT CASE WHEN m.is_from_me = 0 THEN m.ROWID END) AS received,
             MAX(m.date) AS last_date,
             (SELECT COUNT(*) FROM chat_handle_join chj2 WHERE chj2.chat_id = c.ROWID) AS participants
         FROM chat c
@@ -415,14 +420,20 @@ def resolve_group_chat(conn: sqlite3.Connection, identifier: str) -> dict | None
 def messages_for_contact(
     conn: sqlite3.Connection,
     contact: str,
-    limit: int = 500,
+    limit: int | None = None,
     *,
     dm_only: bool = True,
 ) -> list[str]:
+    """Return decoded message text for a contact, deduped by message rowid."""
     texts: list[str] = []
-    for msg in iter_messages(conn, contact=contact, dm_only=dm_only, limit=limit * 3):
+    seen_rowids: set[int] = set()
+    sql_limit = None if limit is None else limit * 3
+    for msg in iter_messages(conn, contact=contact, dm_only=dm_only, limit=sql_limit):
+        if msg.rowid in seen_rowids:
+            continue
+        seen_rowids.add(msg.rowid)
         texts.append(msg.text)
-        if len(texts) >= limit:
+        if limit is not None and len(texts) >= limit:
             break
     return texts
 

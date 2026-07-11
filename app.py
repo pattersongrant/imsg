@@ -86,7 +86,7 @@ def _contact_texts(
     *,
     handle: str,
     is_group: bool,
-    limit: int = 800,
+    limit: int | None = None,
     merge_gcs: bool = True,
 ) -> list[str]:
     texts: list[str] = []
@@ -199,7 +199,7 @@ def contact_detail(contact_id: str):
         is_group = resolved["kind"] == "group"
         lookup_id = resolved["id"]
         texts = _contact_texts(
-            conn, handle=lookup_id, is_group=is_group, limit=800, merge_gcs=merge_gcs
+            conn, handle=lookup_id, is_group=is_group, limit=None, merge_gcs=merge_gcs
         )
         topics = analyze.summarize_topics(texts)
         recent = []
@@ -243,7 +243,7 @@ def global_topics():
         for row in top:
             handle = row["handle"]
             texts = _contact_texts(
-                conn, handle=handle, is_group=False, limit=400, merge_gcs=merge_gcs
+                conn, handle=handle, is_group=False, limit=None, merge_gcs=merge_gcs
             )
             all_texts.extend(texts)
             per_contact.append(

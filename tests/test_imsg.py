@@ -139,6 +139,16 @@ class TestDatabaseReactions:
         texts = [msg.text for msg in db.iter_messages(conn, dm_only=True)]
         assert texts == ["real message"]
 
+    def test_duplicate_join_rows_count_once(self):
+        conn = self._make_db()
+        self._insert_message(conn, 1, "babes", 0)
+        conn.execute(
+            "INSERT INTO chat_message_join (chat_id, message_id) VALUES (1, 1)"
+        )
+        texts = db.messages_for_contact(conn, "+15551234567", limit=None)
+        assert texts.count("babes") == 1
+        assert analyze.top_words(texts)[0] == {"word": "babes", "count": 1}
+
 
 class TestGCS:
     SAMPLE = [
@@ -209,6 +219,10 @@ class TestGCS:
     def test_merge_texts(self):
         merged = gcs.merge_texts(["local one"], ["remote two"], limit=10)
         assert merged == ["local one", "remote two"]
+
+    def test_merge_texts_dedupes_gcs_overlap(self):
+        merged = gcs.merge_texts(["babes", "hello"], ["babes", "world"], limit=None)
+        assert merged == ["babes", "hello", "world"]
 
     def test_index_chat_db(self, tmp_path):
         path = tmp_path / "chat.db"

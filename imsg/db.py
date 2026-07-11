@@ -22,7 +22,11 @@ _GARBAGE_MARKERS = (
     "nsattributed", "nsdictionary", "nsmutable", "nsstring", "nsnumber",
     "nsvalue", "nsobject", "attribute", "optionflags", "objectversion",
     "ddscanner", "nskeyedarchiver", "$classname", "$classes", "streamtyped",
+    "archiver", "$archiver", "$objects", "$top", "$version", "$null",
 )
+
+# Markers that identify an NSKeyedArchiver / binary-plist payload (no plain text).
+_KEYED_ARCHIVE_MARKERS = (b"$archiver", b"NSKeyedArchiver", b"bplist00")
 _GARBAGE_TOKEN_RE = re.compile(
     r"\d{1,3}kim[a-z]|kim(?:message|breadcrumb|file|balloon|date)|"
     r"ns(?:attributed|string|dictionary|mutable|number|value|object)|"
@@ -120,6 +124,12 @@ def _streamtyped_string(blob: bytes) -> str | None:
     return raw.decode("utf-8", errors="replace")
 
 
+def _is_keyed_archive(blob: bytes) -> bool:
+    """True for NSKeyedArchiver / binary-plist blobs whose text isn't inline."""
+    head = blob[:4096]
+    return any(marker in head for marker in _KEYED_ARCHIVE_MARKERS)
+
+
 def _candidates_from_blob(blob: bytes) -> list[str]:
     """Last-resort fallback: scan printable runs for something message-shaped."""
     candidates: list[str] = []
@@ -141,6 +151,10 @@ def decode_attributed_body(blob: bytes | None) -> str | None:
             return text
     except Exception:
         pass
+    # Keyed-archive payloads have no inline text; scraping them yields plist
+    # keys ($archiver/$objects/$top…), so skip the printable-run fallback.
+    if _is_keyed_archive(blob):
+        return None
     try:
         candidates = _candidates_from_blob(blob)
         if not candidates:

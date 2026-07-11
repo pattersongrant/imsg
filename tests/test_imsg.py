@@ -284,6 +284,19 @@ class TestAttributedBodyDecoding(TestDatabaseReactions):
         blob = b"\x04\x0bstreamtyped\x84\x84\x0eNSDictionary\x00\x94\x84\x01i\x01\x86"
         assert db.decode_attributed_body(blob) is None
 
+    def test_keyed_archive_blob_returns_none(self):
+        # NSKeyedArchiver payloads leak $archiver/$objects/$top/$version tokens.
+        blob = (
+            b"bplist00\xd4\x01\x02\x03\x04$version$archiver$top$objects"
+            b"NSKeyedArchiver good morning ems"
+        )
+        assert db.decode_attributed_body(blob) is None
+
+    def test_archiver_tokens_filtered_from_text_check(self):
+        assert not db.looks_like_message_text("versiony archivert topx objects")
+        assert not db.looks_like_message_text("$archiver")
+        assert db.looks_like_message_text("good morning babes")
+
     def test_full_scan_decodes_attributed_body_rows(self):
         conn = self._make_db()  # existing fixture with handle/chat/joins
         sentences = [f"message number {i} about pizza" for i in range(1, 51)]

@@ -189,6 +189,31 @@ class TestDatabaseReactions:
         handles = db.handles_for_contact(conn, directory, "+15551111111")
         assert set(handles) == {"+15551111111", "emma@example.com"}
 
+    def test_person_message_counts_skips_decoded_when_disabled(self):
+        conn = self._make_db()
+        for i in range(1, 6):
+            self._insert_message(conn, i, f"message {i}", 0)
+        directory = ContactDirectory(conn)
+        quick = db.person_message_counts(
+            conn, directory, "+15551234567", count_decoded=False
+        )
+        assert quick["total"] == 5
+        assert quick["decoded"] is None
+        deep = db.person_message_counts(
+            conn, directory, "+15551234567", count_decoded=True
+        )
+        assert deep["decoded"] == 5
+
+    def test_messages_for_person_respects_limit(self):
+        conn = self._make_db()
+        for i in range(1, 11):
+            self._insert_message(conn, i, f"word{i}", 0)
+        directory = ContactDirectory(conn)
+        quick = db.messages_for_person(conn, directory, "+15551234567", limit=3)
+        assert len(quick) == 3
+        full = db.messages_for_person(conn, directory, "+15551234567", limit=None)
+        assert len(full) == 10
+
 
 class TestGCS:
     SAMPLE = [

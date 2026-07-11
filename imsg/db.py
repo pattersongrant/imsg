@@ -542,8 +542,13 @@ def person_message_counts(
     identifier: str,
     *,
     include_groups: bool = True,
+    count_decoded: bool = True,
 ) -> dict[str, int]:
-    """How many message rows exist in the DB vs how many decode to text."""
+    """How many message rows exist in the DB vs how many decode to text.
+
+    ``count_decoded`` walks every message and is expensive; skip it for the
+    fast preview and only run it during a deep scan.
+    """
     handles = handles_for_contact(conn, directory, identifier)
     placeholders = ",".join("?" * len(handles))
 
@@ -570,6 +575,9 @@ def person_message_counts(
               AND {_content_filter(conn)}
         """
         total += conn.execute(group_sql, handles).fetchone()[0]
+
+    if not count_decoded:
+        return {"total": total, "decoded": None}
 
     decoded = sum(1 for _ in iter_messages_for_person(
         conn, directory, identifier, include_groups=include_groups, limit=None

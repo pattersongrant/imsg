@@ -90,14 +90,19 @@ def _contact_texts(
     limit: int | None = None,
     merge_gcs: bool = True,
 ) -> tuple[list[str], dict[str, int]]:
+    deep = limit is None
     if is_group:
         texts = db.messages_for_contact(conn, handle, limit=limit, dm_only=False)
         counts = {"total": len(texts), "decoded": len(texts)}
     else:
-        counts = db.person_message_counts(conn, directory, handle, include_groups=True)
+        counts = db.person_message_counts(
+            conn, directory, handle, include_groups=True, count_decoded=deep
+        )
         texts = db.messages_for_person(
             conn, directory, handle, include_groups=True, limit=limit
         )
+        if counts.get("decoded") is None:
+            counts["decoded"] = len(texts)
     if merge_gcs and gcs.gcs_configured():
         texts = gcs.merge_texts(texts, gcs.texts_for_handle(handle, limit=limit), limit=limit)
     return texts, counts
@@ -196,25 +201,32 @@ def activity():
         return jsonify({"ok": False, "message": str(exc)}), 403
 
 
+# Fast preview only samples the most recent messages; deep scan reads everything.
+QUICK_MESSAGE_LIMIT = 20
+
+
 @app.route("/api/contact/<path:contact_id>")
 def contact_detail(contact_id: str):
     merge_gcs = request.args.get("gcs", "1") == "1"
+    deep = request.args.get("deep", "0") == "1"
     try:
         conn, directory = _open()
         resolved = _resolve_contact(conn, directory, contact_id)
         is_group = resolved["kind"] == "group"
         lookup_id = resolved["id"]
+        analysis_limit = None if deep else QUICK_MESSAGE_LIMIT
         texts, msg_counts = _contact_texts(
             conn,
             directory,
             handle=lookup_id,
             is_group=is_group,
-            limit=None,
+            limit=analysis_limit,
             merge_gcs=merge_gcs,
         )
         topics = analyze.summarize_topics(texts)
         topics["messages_total"] = msg_counts.get("total", len(texts))
         topics["messages_decoded"] = len(texts)
+        topics["deep"] = deep
         recent = []
         for msg in db.iter_messages(
             conn, contact=lookup_id, dm_only=not is_group, limit=30
@@ -233,6 +245,7 @@ def contact_detail(contact_id: str):
                 "name": resolved["display"],
                 "display": resolved["display"],
                 "is_group": is_group,
+                "deep": deep,
                 "topics": topics,
                 "recent": recent,
             }

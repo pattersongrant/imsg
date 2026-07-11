@@ -180,28 +180,47 @@ function renderContacts(contacts) {
   }
 }
 
-async function selectContact(contact, rowEl) {
+async function selectContact(contact, rowEl, { deep = false } = {}) {
   selectedContact = contact;
   selectedRowEl = rowEl;
   $$(".contact-row").forEach(r => r.classList.toggle("selected", r === rowEl));
   const title = $("#detail-title");
   const content = $("#detail-content");
   title.textContent = "Loading…";
-  content.innerHTML = '<p class="loading">Loading…</p>';
+  content.innerHTML = deep
+    ? '<p class="loading">Deep scanning every message… this can take a moment.</p>'
+    : '<p class="loading">Loading…</p>';
 
   try {
-    const data = await fetchJSON(`/api/contact/${encodeURIComponent(contact)}`);
+    const url = `/api/contact/${encodeURIComponent(contact)}${deep ? "?deep=1" : ""}`;
+    const data = await fetchJSON(url);
     const { topics, recent } = data;
     const display = maskName(contact, data.display || data.name || contact, !!data.is_group);
     title.textContent = display;
 
+    const total = topics.messages_total;
+    const decoded = topics.messages_decoded || topics.message_count || 0;
+    const isDeep = !!data.deep;
+
     let html = `<div class="section-label">Top words${data.is_group ? " (group)" : " (all messages)"}`;
-    if (topics.messages_total && topics.messages_decoded !== topics.messages_total) {
-      html += ` · ${maskCount(topics.messages_decoded)} of ${maskCount(topics.messages_total)} messages analyzed`;
-    } else if (topics.message_count || topics.messages_decoded) {
-      html += ` · ${maskCount(topics.messages_decoded || topics.message_count)} messages analyzed`;
+    if (isDeep && total && decoded !== total) {
+      html += ` · ${maskCount(decoded)} of ${maskCount(total)} messages analyzed`;
+    } else if (isDeep) {
+      html += ` · ${maskCount(decoded)} messages analyzed`;
+    } else {
+      html += ` · quick preview (last ${maskCount(decoded)}${total ? ` of ${maskCount(total)}` : ""})`;
     }
     html += `</div>`;
+
+    if (!data.is_group) {
+      if (isDeep) {
+        html += `<div class="deep-scan-row"><span class="hint">Deep scan complete — every message analyzed.</span></div>`;
+      } else {
+        const label = total ? `Deep index — scan all ${maskCount(total)} messages` : "Deep index — scan every message";
+        html += `<div class="deep-scan-row"><button id="deep-scan-btn" class="deep-scan-btn">${escapeHtml(label)}</button></div>`;
+      }
+    }
+
     html += '<div id="detail-words" class="tag-cloud"></div>';
     if (topics.phrases && topics.phrases.length) {
       html += '<div class="section-label">Common phrases</div>';
@@ -219,6 +238,15 @@ async function selectContact(contact, rowEl) {
 
     content.innerHTML = html;
     renderTags(topics.words, $("#detail-words"));
+
+    const deepBtn = $("#deep-scan-btn");
+    if (deepBtn) {
+      deepBtn.addEventListener("click", () => {
+        deepBtn.disabled = true;
+        deepBtn.textContent = "Deep scanning…";
+        selectContact(contact, selectedRowEl, { deep: true });
+      });
+    }
   } catch (err) {
     title.textContent = anonymousMode ? "Hidden contact" : contact;
     content.innerHTML = `<p class="hint">Error: ${escapeHtml(err.message)}</p>`;

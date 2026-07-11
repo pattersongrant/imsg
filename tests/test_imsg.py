@@ -5,6 +5,7 @@ from datetime import datetime
 import pytest
 
 from imsg import analyze, db, gcs
+from imsg.contacts import ContactDirectory
 from imsg.reactions import is_reaction_message, looks_like_reaction_text, strip_reaction_prefix
 
 
@@ -148,6 +149,45 @@ class TestDatabaseReactions:
         texts = db.messages_for_contact(conn, "+15551234567", limit=None)
         assert texts.count("babes") == 1
         assert analyze.top_words(texts)[0] == {"word": "babes", "count": 1}
+
+    def test_message_text_falls_back_to_attributed_body(self, monkeypatch):
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.execute(
+            """
+            CREATE TABLE message (
+                ROWID INTEGER PRIMARY KEY, text TEXT, attributedBody BLOB,
+                is_from_me INTEGER, date INTEGER, handle_id INTEGER,
+                associated_message_type INTEGER
+            )
+            """
+        )
+        conn.execute(
+            "INSERT INTO message (ROWID, text, attributedBody, is_from_me, associated_message_type) VALUES (1, 'kimmessage', ?, 1, 0)",
+            (b"ignored",),
+        )
+        row = conn.execute("SELECT * FROM message WHERE ROWID = 1").fetchone()
+        monkeypatch.setattr(db, "decode_attributed_body", lambda _blob: "hello from blob")
+        assert db.message_text(row) == "hello from blob"
+
+    def test_handles_for_contact_merges_same_name(self):
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.executescript(
+            """
+            CREATE TABLE handle (ROWID INTEGER PRIMARY KEY, id TEXT NOT NULL);
+            CREATE TABLE chat (ROWID INTEGER PRIMARY KEY, chat_identifier TEXT, display_name TEXT);
+            CREATE TABLE chat_handle_join (chat_id INTEGER, handle_id INTEGER);
+            """
+        )
+        conn.execute("INSERT INTO handle (ROWID, id) VALUES (1, '+15551111111'), (2, 'emma@example.com')")
+        conn.execute(
+            "INSERT INTO chat (ROWID, chat_identifier, display_name) VALUES (1, '+15551111111', 'Emma Cruz'), (2, 'emma@example.com', 'Emma Cruz')"
+        )
+        conn.execute("INSERT INTO chat_handle_join (chat_id, handle_id) VALUES (1, 1), (2, 2)")
+        directory = ContactDirectory(conn)
+        handles = db.handles_for_contact(conn, directory, "+15551111111")
+        assert set(handles) == {"+15551111111", "emma@example.com"}
 
 
 class TestGCS:

@@ -152,11 +152,10 @@ def message_text(row: sqlite3.Row) -> str | None:
     text = row["text"]
     if text and str(text).strip():
         cleaned = str(text).strip()
-        if not looks_like_message_text(cleaned):
-            return None
-        if is_reaction_message(cleaned, associated_message_type=associated_type):
-            return None
-        return cleaned
+        if looks_like_message_text(cleaned):
+            if is_reaction_message(cleaned, associated_message_type=associated_type):
+                return None
+            return cleaned
     body = row["attributedBody"]
     if body:
         decoded = decode_attributed_body(body if isinstance(body, bytes) else bytes(body))
@@ -415,6 +414,188 @@ def resolve_group_chat(conn: sqlite3.Connection, identifier: str) -> dict | None
     if not row:
         return None
     return {"id": row["chat_identifier"], "display": row["label"]}
+
+
+def handles_for_contact(
+    conn: sqlite3.Connection,
+    directory: ContactDirectory,
+    identifier: str,
+) -> list[str]:
+    """All handle IDs (phone/email/etc.) for one person."""
+    handles: set[str] = set()
+
+    if conn.execute("SELECT 1 FROM handle WHERE id = ?", (identifier,)).fetchone():
+        handles.add(identifier)
+
+    target_names = {identifier}
+    if handles:
+        target_names.add(directory.name_for(identifier))
+
+    for row in conn.execute("SELECT id FROM handle"):
+        hid = row["id"]
+        name = directory.name_for(hid)
+        if hid == identifier or name == identifier or name in target_names:
+            handles.add(hid)
+
+    if _has_table(conn, "chat"):
+        for row in conn.execute(
+            """
+            SELECT DISTINCT h.id
+            FROM chat c
+            JOIN chat_handle_join chj ON chj.chat_id = c.ROWID
+            JOIN handle h ON chj.handle_id = h.ROWID
+            WHERE c.display_name = ? OR c.chat_identifier = ?
+            """,
+            (identifier, identifier),
+        ):
+            handles.add(row["id"])
+
+    return sorted(handles) if handles else [identifier]
+
+
+def _yield_message_row(
+    conn: sqlite3.Connection,
+    row: sqlite3.Row,
+    seen_rowids: set[int],
+) -> Message | None:
+    rowid = row["rowid"]
+    if rowid in seen_rowids:
+        return None
+    txt = message_text(row)
+    if not txt:
+        return None
+    seen_rowids.add(rowid)
+    contact_label = row["contact_id"] or row["chat_identifier"] or row["chat_name"]
+    return Message(
+        rowid=rowid,
+        text=txt,
+        is_from_me=bool(row["is_from_me"]),
+        date=apple_timestamp_to_datetime(row["date"]),
+        handle_id=row["handle_id"],
+        contact=contact_label,
+        chat_id=row["chat_id"],
+        chat_name=row["chat_name"],
+    )
+
+
+def iter_messages_for_person(
+    conn: sqlite3.Connection,
+    directory: ContactDirectory,
+    identifier: str,
+    *,
+    include_groups: bool = True,
+    limit: int | None = None,
+) -> Iterator[Message]:
+    """All decodable DM + group messages for a person across every handle."""
+    handles = handles_for_contact(conn, directory, identifier)
+    seen_rowids: set[int] = set()
+    yielded = 0
+
+    for handle in handles:
+        for msg in iter_messages(conn, contact=handle, dm_only=True, limit=None):
+            if msg.rowid in seen_rowids:
+                continue
+            seen_rowids.add(msg.rowid)
+            yield msg
+            yielded += 1
+            if limit is not None and yielded >= limit:
+                return
+
+    if not include_groups or not handles:
+        return
+
+    placeholders = ",".join("?" * len(handles))
+    sql = f"""
+        SELECT
+            m.ROWID AS rowid,
+            m.text,
+            m.attributedBody,
+            m.is_from_me,
+            m.date,
+            m.handle_id,
+            h.id AS contact_id,
+            c.ROWID AS chat_id,
+            COALESCE(NULLIF(c.display_name, ''), c.chat_identifier) AS chat_name,
+            c.chat_identifier
+        FROM message m
+        JOIN handle h ON m.handle_id = h.ROWID
+        JOIN chat_message_join cmj ON cmj.message_id = m.ROWID
+        JOIN chat c ON cmj.chat_id = c.ROWID
+        WHERE h.id IN ({placeholders})
+          AND (SELECT COUNT(*) FROM chat_handle_join chj WHERE chj.chat_id = c.ROWID) > 1
+          AND {_content_filter(conn)}
+        ORDER BY m.date DESC
+    """
+    for row in conn.execute(sql, handles):
+        msg = _yield_message_row(conn, row, seen_rowids)
+        if not msg:
+            continue
+        yield msg
+        yielded += 1
+        if limit is not None and yielded >= limit:
+            return
+
+
+def person_message_counts(
+    conn: sqlite3.Connection,
+    directory: ContactDirectory,
+    identifier: str,
+    *,
+    include_groups: bool = True,
+) -> dict[str, int]:
+    """How many message rows exist in the DB vs how many decode to text."""
+    handles = handles_for_contact(conn, directory, identifier)
+    placeholders = ",".join("?" * len(handles))
+
+    dm_sql = f"""
+        WITH {_dm_chat_cte()}
+        SELECT COUNT(DISTINCT m.ROWID)
+        FROM dm_chat d
+        JOIN handle h ON d.handle_id = h.ROWID
+        JOIN chat_message_join cmj ON cmj.chat_id = d.chat_id
+        JOIN message m ON cmj.message_id = m.ROWID
+        WHERE h.id IN ({placeholders}) AND {_content_filter(conn)}
+    """
+    total = conn.execute(dm_sql, handles).fetchone()[0]
+
+    if include_groups:
+        group_sql = f"""
+            SELECT COUNT(DISTINCT m.ROWID)
+            FROM message m
+            JOIN handle h ON m.handle_id = h.ROWID
+            JOIN chat_message_join cmj ON cmj.message_id = m.ROWID
+            JOIN chat c ON cmj.chat_id = c.ROWID
+            WHERE h.id IN ({placeholders})
+              AND (SELECT COUNT(*) FROM chat_handle_join chj WHERE chj.chat_id = c.ROWID) > 1
+              AND {_content_filter(conn)}
+        """
+        total += conn.execute(group_sql, handles).fetchone()[0]
+
+    decoded = sum(1 for _ in iter_messages_for_person(
+        conn, directory, identifier, include_groups=include_groups, limit=None
+    ))
+    return {"total": total, "decoded": decoded}
+
+
+def messages_for_person(
+    conn: sqlite3.Connection,
+    directory: ContactDirectory,
+    identifier: str,
+    *,
+    include_groups: bool = True,
+    limit: int | None = None,
+) -> list[str]:
+    """Full conversation text for a person (all handles, optional group messages)."""
+    return [
+        msg.text
+        for msg in iter_messages_for_person(
+            conn,
+            directory,
+            identifier,
+            include_groups=include_groups,
+            limit=limit,
+        )
+    ]
 
 
 def messages_for_contact(

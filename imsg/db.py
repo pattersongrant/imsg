@@ -89,37 +89,45 @@ def looks_like_message_text(text: str) -> bool:
     return True
 
 
+def _streamtyped_string(blob: bytes) -> str | None:
+    """Parse the first length-prefixed NSString value out of a streamtyped blob."""
+    marker = b"NSString"
+    idx = blob.find(marker)
+    if idx == -1:
+        return None
+    p = idx + len(marker)
+    plus = blob.find(b"\x2b", p, p + 12)  # '+' precedes the length
+    if plus == -1:
+        return None
+    p = plus + 1
+    if p >= len(blob):
+        return None
+    length = blob[p]
+    p += 1
+    if length == 0x81:
+        if p + 2 > len(blob):
+            return None
+        length = int.from_bytes(blob[p:p + 2], "little")
+        p += 2
+    elif length == 0x82:
+        if p + 4 > len(blob):
+            return None
+        length = int.from_bytes(blob[p:p + 4], "little")
+        p += 4
+    raw = blob[p:p + length]
+    if len(raw) < length:
+        return None
+    return raw.decode("utf-8", errors="replace")
+
+
 def _candidates_from_blob(blob: bytes) -> list[str]:
+    """Last-resort fallback: scan printable runs for something message-shaped."""
     candidates: list[str] = []
-
-    # NSString segment — actual message text usually lives here.
-    for match in re.finditer(rb"NSString\x00+(.+?)\x00", blob, re.DOTALL):
-        raw = match.group(1)
-        for i in range(min(24, len(raw))):
-            chunk = raw[i:].split(b"\x00", 1)[0]
-            try:
-                text = chunk.decode("utf-8", errors="ignore").strip()
-            except Exception:
-                continue
-            if text and looks_like_message_text(text):
-                candidates.append(text)
-
-    # Typedstream sometimes stores readable text after a length byte.
-    for match in re.finditer(rb"[\x01\x02]\x0b([\x20-\x7E\u00A0-\uFFFF]{2,}?)\x00", blob):
-        try:
-            text = match.group(1).decode("utf-8", errors="ignore").strip()
-        except Exception:
-            continue
-        if text and looks_like_message_text(text):
-            candidates.append(text)
-
-    # Last resort: printable runs, but only if they pass the garbage filter.
     decoded = blob.decode("utf-8", errors="ignore")
     for run in re.findall(r"[\x20-\x7E\u00A0-\uFFFF]{2,}", decoded):
         run = run.strip()
         if looks_like_message_text(run):
             candidates.append(run)
-
     return candidates
 
 
@@ -127,6 +135,12 @@ def decode_attributed_body(blob: bytes | None) -> str | None:
     """Best-effort extraction of plain text from attributedBody blobs."""
     if not blob:
         return None
+    try:
+        text = _streamtyped_string(blob)
+        if text and looks_like_message_text(text):
+            return text
+    except Exception:
+        pass
     try:
         candidates = _candidates_from_blob(blob)
         if not candidates:

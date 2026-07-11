@@ -215,6 +215,90 @@ class TestDatabaseReactions:
         assert len(full) == 10
 
 
+def _make_attributed_body(text: str) -> bytes:
+    body = text.encode("utf-8")
+    n = len(body)
+    if n < 0x80:
+        length = bytes([n])
+    elif n < 0x1_0000:
+        length = b"\x81" + n.to_bytes(2, "little")
+    else:
+        length = b"\x82" + n.to_bytes(4, "little")
+    header = (
+        b"\x04\x0bstreamtyped\x81\xe8\x03\x84\x01@\x84\x84\x84"
+        b"\x12NSAttributedString\x00\x84\x84\x08NSObject\x00\x85\x92\x84\x84\x84"
+        b"\x0eNSString\x01\x94\x84\x01+"
+    )
+    trailer = b"\x86\x84\x02iI\x01\x00\x84\x84\x08NSDictionary\x00\x94\x84\x01i\x01\x86"
+    return header + length + body + trailer
+
+
+class TestAttributedBodyDecoding(TestDatabaseReactions):
+    def test_short_message(self):
+        blob = _make_attributed_body("hey what are you doing tonight")
+        assert db.decode_attributed_body(blob) == "hey what are you doing tonight"
+
+    def test_long_message_two_byte_length(self):
+        text = "babes " * 300  # > 127 bytes -> 0x81 + 2-byte length
+        blob = _make_attributed_body(text.strip())
+        decoded = db.decode_attributed_body(blob)
+        assert decoded is not None
+        assert decoded.count("babes") == 300
+
+    def test_unicode_and_emoji(self):
+        text = "café ☕ let's go 🚗 mañana"
+        blob = _make_attributed_body(text)
+        assert db.decode_attributed_body(blob) == text
+
+    def test_message_text_prefers_text_column(self):
+        # message_text should use text column when it is clean
+        class Row(dict):
+            def keys(self):  # sqlite3.Row-like
+                return list(super().keys())
+        row = Row(text="plain text wins", attributedBody=_make_attributed_body("ignored"),
+                  associated_message_type=0)
+        assert db.message_text(row) == "plain text wins"
+
+    def test_message_text_uses_attributed_body_when_text_null(self):
+        class Row(dict):
+            def keys(self):
+                return list(super().keys())
+        row = Row(text=None, attributedBody=_make_attributed_body("from blob body"),
+                  associated_message_type=0)
+        assert db.message_text(row) == "from blob body"
+
+    def test_tapback_still_filtered_even_if_in_blob(self):
+        class Row(dict):
+            def keys(self):
+                return list(super().keys())
+        row = Row(text=None, attributedBody=_make_attributed_body('Loved "dinner?"'),
+                  associated_message_type=2000)
+        assert db.message_text(row) is None
+
+    def test_non_string_blob_returns_none(self):
+        # attachment-only / empty payloads should decode to None, not garbage
+        assert db.decode_attributed_body(b"\x04\x0bstreamtyped\x81\xe8\x03") is None
+
+    def test_garbage_metadata_not_returned(self):
+        # NSDictionary / archiver keys must never surface as "text"
+        blob = b"\x04\x0bstreamtyped\x84\x84\x0eNSDictionary\x00\x94\x84\x01i\x01\x86"
+        assert db.decode_attributed_body(blob) is None
+
+    def test_full_scan_decodes_attributed_body_rows(self):
+        conn = self._make_db()  # existing fixture with handle/chat/joins
+        sentences = [f"message number {i} about pizza" for i in range(1, 51)]
+        for i, s in enumerate(sentences, start=1):
+            conn.execute(
+                "INSERT INTO message (ROWID, text, attributedBody, is_from_me, date, handle_id, associated_message_type) "
+                "VALUES (?, NULL, ?, 0, ?, 1, 0)",
+                (i, _make_attributed_body(s), 700000000 + i),
+            )
+            conn.execute("INSERT INTO chat_message_join (chat_id, message_id) VALUES (1, ?)", (i,))
+        texts = db.messages_for_contact(conn, "+15551234567", limit=None)
+        assert len(texts) == 50            # not 0, not a handful
+        assert "pizza" in " ".join(texts)
+
+
 class TestGCS:
     SAMPLE = [
         {"handle": "+15551234567", "name": "Alex", "text": "hello", "is_from_me": True},

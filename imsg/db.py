@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Iterator
 
 from imsg.contacts import ContactDirectory
+from imsg.time_estimate import estimate_summary
 from imsg.reactions import is_reaction_message
 
 APPLE_EPOCH = datetime(2001, 1, 1)
@@ -402,6 +403,19 @@ def group_chat_stats(conn: sqlite3.Connection, directory: ContactDirectory | Non
     return rows
 
 
+def _timeline_period_key(dt: datetime, bucket: str) -> str:
+    if bucket == "year":
+        return dt.strftime("%Y")
+    if bucket == "month":
+        return dt.strftime("%Y-%m")
+    if bucket == "day":
+        return dt.strftime("%Y-%m-%d")
+    if bucket == "week":
+        iso = dt.isocalendar()
+        return f"{iso.year}-W{iso.week:02d}"
+    return dt.strftime("%Y-%m")
+
+
 def contact_timeline(
     conn: sqlite3.Connection,
     directory: ContactDirectory,
@@ -410,8 +424,7 @@ def contact_timeline(
     is_group: bool = False,
     bucket: str = "month",
 ) -> dict[str, int]:
-    """Message counts per period (month or year) for one person or group chat."""
-    fmt = "%Y" if bucket == "year" else "%Y-%m"
+    """Message counts per period (day, week, month, or year) for one person or group chat."""
     buckets: dict[str, int] = {}
 
     if is_group:
@@ -448,7 +461,7 @@ def contact_timeline(
         dt = apple_timestamp_to_datetime(row["date"])
         if not dt:
             continue
-        key = dt.strftime(fmt)
+        key = _timeline_period_key(dt, bucket)
         buckets[key] = buckets.get(key, 0) + 1
     return buckets
 
@@ -722,9 +735,27 @@ def messages_for_contact(
 
 
 def database_summary(conn: sqlite3.Connection) -> dict:
-    total = conn.execute(
-        f"SELECT COUNT(*) FROM message m WHERE {_content_filter(conn)}"
-    ).fetchone()[0]
+    row = conn.execute(
+        f"""
+        SELECT
+            COUNT(*) AS total,
+            SUM(CASE WHEN m.is_from_me = 1 THEN 1 ELSE 0 END) AS sent,
+            SUM(CASE WHEN m.is_from_me = 0 THEN 1 ELSE 0 END) AS received
+        FROM message m
+        WHERE {_content_filter(conn)}
+        """
+    ).fetchone()
+    total = row["total"] or 0
+    sent = row["sent"] or 0
+    received = row["received"] or 0
     handles = conn.execute("SELECT COUNT(*) FROM handle").fetchone()[0]
     chats = conn.execute("SELECT COUNT(*) FROM chat").fetchone()[0] if _has_table(conn, "chat") else 0
-    return {"messages": total, "handles": handles, "chats": chats}
+    summary = {
+        "messages": total,
+        "sent": sent,
+        "received": received,
+        "handles": handles,
+        "chats": chats,
+    }
+    summary.update(estimate_summary(sent=sent, received=received, total=total))
+    return summary

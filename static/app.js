@@ -91,6 +91,40 @@ function maskPhrase(phrase, index) {
   return GENERIC_PHRASES[index % GENERIC_PHRASES.length];
 }
 
+function maskDuration(seconds) {
+  if (!anonymousMode) return formatDuration(seconds);
+  if (seconds < 3600) return "~1 hr";
+  if (seconds < 86400 * 7) return `~${Math.max(1, Math.round(seconds / 86400))} days`;
+  if (seconds < 86400 * 365) return `~${Math.max(1, Math.round(seconds / (86400 * 30)))} mo`;
+  return `~${Math.max(1, Math.round(seconds / (86400 * 365)))} yr`;
+}
+
+function formatDuration(seconds) {
+  if (seconds <= 0) return "0 min";
+  if (seconds < 3600) {
+    const minutes = Math.max(1, Math.round(seconds / 60));
+    return `${minutes} min`;
+  }
+  if (seconds < 86400 * 2) {
+    const hours = seconds / 3600;
+    const text = `${hours.toFixed(1)} hr`;
+    return text.endsWith(".0 hr") ? `${Math.round(hours)} hr` : text;
+  }
+  if (seconds < 86400 * 60) {
+    const days = seconds / 86400;
+    const text = `${days.toFixed(1)} days`;
+    return text.endsWith(".0 days") ? `${Math.round(days)} days` : text;
+  }
+  if (seconds < 86400 * 365) {
+    const weeks = seconds / (86400 * 7);
+    const text = `${weeks.toFixed(1)} wk`;
+    return text.endsWith(".0 wk") ? `${Math.round(weeks)} wk` : text;
+  }
+  const years = seconds / (86400 * 365);
+  const text = `${years.toFixed(1)} yr`;
+  return text.endsWith(".0 yr") ? `${Math.round(years)} yr` : text;
+}
+
 function showBanner(type, html) {
   const el = $("#status-banner");
   el.className = `banner ${type}`;
@@ -432,8 +466,26 @@ function niceCeil(n) {
 
 function periodLabel(period, bucket) {
   if (bucket === "year") return period;
-  const [y, m] = period.split("-");
-  const d = new Date(Number(y), Number(m) - 1, 1);
+  if (bucket === "week") {
+    const match = period.match(/^(\d{4})-W(\d{2})$/);
+    if (match) {
+      const week = Number(match[2]);
+      if (anonymousMode) return `W${week}`;
+      return `W${week} '${match[1].slice(2)}`;
+    }
+  }
+  const parts = period.split("-");
+  const y = Number(parts[0]);
+  const m = Number(parts[1]) - 1;
+  if (bucket === "day") {
+    const day = Number(parts[2]);
+    const dt = new Date(y, m, day);
+    if (anonymousMode) {
+      return dt.toLocaleDateString(undefined, { month: "short", year: "2-digit" });
+    }
+    return dt.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+  }
+  const d = new Date(y, m, 1);
   return d.toLocaleDateString(undefined, { month: "short", year: "2-digit" });
 }
 
@@ -508,7 +560,8 @@ function renderTimeline(data) {
     svg.appendChild(label);
   }
 
-  const maxLabels = Math.min(periods.length, Math.max(4, Math.floor(plotW / 70)));
+  const labelWidth = data.bucket === "day" ? 52 : data.bucket === "week" ? 58 : 70;
+  const maxLabels = Math.min(periods.length, Math.max(4, Math.floor(plotW / labelWidth)));
   const labelStep = Math.max(1, Math.ceil(periods.length / maxLabels));
   periods.forEach((p, i) => {
     if (i % labelStep !== 0 && i !== periods.length - 1) return;
@@ -696,6 +749,8 @@ function refreshAnonymousViews() {
   if (topicsCache) renderTopics(topicsCache);
   if (bubblesCache.length) renderBubbles(bubblesCache);
   if (timelineCache) renderTimeline(timelineCache);
+  const statusSummary = window.__summaryStats;
+  if (statusSummary) renderSummaryStats(statusSummary);
 }
 
 function setupAnonymousToggle() {
@@ -730,8 +785,11 @@ function setupTabs() {
 }
 
 function renderSummaryStats(s) {
+  const timeLabel = maskDuration(s.time_seconds || 0);
+  const timeHint = anonymousMode ? "estimated" : (s.time_note || "estimated");
   $("#summary-stats").innerHTML = `
     <div class="stat-card"><div class="value">${maskCount(s.messages)}</div><div class="label">Messages</div></div>
+    <div class="stat-card"><div class="value">${timeLabel}</div><div class="label">Est. time messaging</div><div class="stat-sub">${escapeHtml(timeHint)}</div></div>
     <div class="stat-card"><div class="value">${maskCount(s.handles)}</div><div class="label">Contacts</div></div>
     <div class="stat-card"><div class="value">${maskCount(s.chats)}</div><div class="label">Chats</div></div>`;
 }
@@ -746,6 +804,7 @@ async function init() {
     if (!status.ok) throw new Error(status.message);
 
     renderSummaryStats(status.summary);
+    window.__summaryStats = status.summary;
 
     const [contactsData, activityData] = await Promise.all([
       fetchJSON("/api/contacts?limit=50"),

@@ -347,6 +347,26 @@ class TestContactTimeline(TestDatabaseReactions):
         buckets = db.contact_timeline(conn, directory, "+15551234567", bucket="year")
         assert buckets == {"2023": 1, "2024": 2}
 
+    def test_groups_by_day(self):
+        conn = self._make_db()
+        directory = ContactDirectory(conn)
+        self._insert_at(conn, 1, datetime(2024, 1, 15))
+        self._insert_at(conn, 2, datetime(2024, 1, 15))
+        self._insert_at(conn, 3, datetime(2024, 1, 16))
+
+        buckets = db.contact_timeline(conn, directory, "+15551234567", bucket="day")
+        assert buckets == {"2024-01-15": 2, "2024-01-16": 1}
+
+    def test_groups_by_week(self):
+        conn = self._make_db()
+        directory = ContactDirectory(conn)
+        self._insert_at(conn, 1, datetime(2024, 1, 15))  # Mon, ISO week 3
+        self._insert_at(conn, 2, datetime(2024, 1,17))   # Wed, same week
+        self._insert_at(conn, 3, datetime(2024, 1, 22))  # Mon, ISO week 4
+
+        buckets = db.contact_timeline(conn, directory, "+15551234567", bucket="week")
+        assert buckets == {"2024-W03": 2, "2024-W04": 1}
+
     def test_dedupes_duplicate_chat_message_join_rows(self):
         conn = self._make_db()
         directory = ContactDirectory(conn)
@@ -447,6 +467,22 @@ class TestTimelineEndpoint:
         assert data["bucket"] == "year"
         alex = next(c for c in data["contacts"] if c["name"] == "Alex")
         assert alex["series"] == [{"period": "2024", "count": 3}]
+
+    def test_daily_bucket_param(self, monkeypatch):
+        client = self._patch(monkeypatch)
+        response = client.get("/api/timeline?limit=25&bucket=day")
+        data = response.get_json()
+        assert data["bucket"] == "day"
+        alex = next(c for c in data["contacts"] if c["name"] == "Alex")
+        assert alex["series"] == [{"period": "2024-05-01", "count": 3}]
+
+    def test_weekly_bucket_param(self, monkeypatch):
+        client = self._patch(monkeypatch)
+        response = client.get("/api/timeline?limit=25&bucket=week")
+        data = response.get_json()
+        assert data["bucket"] == "week"
+        alex = next(c for c in data["contacts"] if c["name"] == "Alex")
+        assert alex["series"] == [{"period": "2024-W18", "count": 3}]
 
 
 class TestGroupDeepScan:
@@ -665,3 +701,37 @@ class TestFlaskAPI:
         data = response.get_json()
         assert "gcs" in data
         assert data["gcs"]["configured"] is False
+
+
+class TestTimeEstimate:
+    def test_estimate_uses_sent_and_received_rates(self):
+        from imsg.time_estimate import estimate_seconds, format_duration
+
+        assert estimate_seconds(sent=10, received=10) == 10 * 20 + 10 * 12
+        assert format_duration(3600) == "1 hr"
+        assert format_duration(90 * 60) == "1.5 hr"
+
+    def test_database_summary_includes_time(self):
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.executescript(
+            """
+            CREATE TABLE handle (ROWID INTEGER PRIMARY KEY, id TEXT NOT NULL);
+            CREATE TABLE message (
+                ROWID INTEGER PRIMARY KEY, text TEXT, attributedBody BLOB,
+                is_from_me INTEGER, date INTEGER, handle_id INTEGER,
+                associated_message_type INTEGER
+            );
+            """
+        )
+        conn.execute("INSERT INTO message (ROWID, text, is_from_me) VALUES (1, 'hi', 1)")
+        conn.execute("INSERT INTO message (ROWID, text, is_from_me) VALUES (2, 'hey', 0)")
+        conn.execute("INSERT INTO message (ROWID, text, is_from_me) VALUES (3, 'yo', 0)")
+
+        summary = db.database_summary(conn)
+        assert summary["messages"] == 3
+        assert summary["sent"] == 1
+        assert summary["received"] == 2
+        assert summary["time_seconds"] == 1 * 20 + 2 * 12
+        assert summary["time_display"] == "1 min"
+        assert "20s sent" in summary["time_note"]

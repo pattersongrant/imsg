@@ -211,7 +211,7 @@ def timeline():
     """
     limit = min(int(request.args.get("limit", 25)), 50)
     bucket = request.args.get("bucket", "month")
-    if bucket not in ("month", "year"):
+    if bucket not in ("day", "week", "month", "year"):
         bucket = "month"
     merge_gcs = request.args.get("gcs", "1") == "1"
     try:

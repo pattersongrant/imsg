@@ -5,6 +5,7 @@ from datetime import datetime
 import pytest
 
 from imsg import analyze, db, gcs
+from imsg.contacts import ContactDirectory
 from imsg.reactions import is_reaction_message, looks_like_reaction_text, strip_reaction_prefix
 
 
@@ -139,6 +140,177 @@ class TestDatabaseReactions:
         texts = [msg.text for msg in db.iter_messages(conn, dm_only=True)]
         assert texts == ["real message"]
 
+    def test_duplicate_join_rows_count_once(self):
+        conn = self._make_db()
+        self._insert_message(conn, 1, "babes", 0)
+        conn.execute(
+            "INSERT INTO chat_message_join (chat_id, message_id) VALUES (1, 1)"
+        )
+        texts = db.messages_for_contact(conn, "+15551234567", limit=None)
+        assert texts.count("babes") == 1
+        assert analyze.top_words(texts)[0] == {"word": "babes", "count": 1}
+
+    def test_message_text_falls_back_to_attributed_body(self, monkeypatch):
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.execute(
+            """
+            CREATE TABLE message (
+                ROWID INTEGER PRIMARY KEY, text TEXT, attributedBody BLOB,
+                is_from_me INTEGER, date INTEGER, handle_id INTEGER,
+                associated_message_type INTEGER
+            )
+            """
+        )
+        conn.execute(
+            "INSERT INTO message (ROWID, text, attributedBody, is_from_me, associated_message_type) VALUES (1, 'kimmessage', ?, 1, 0)",
+            (b"ignored",),
+        )
+        row = conn.execute("SELECT * FROM message WHERE ROWID = 1").fetchone()
+        monkeypatch.setattr(db, "decode_attributed_body", lambda _blob: "hello from blob")
+        assert db.message_text(row) == "hello from blob"
+
+    def test_handles_for_contact_merges_same_name(self):
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.executescript(
+            """
+            CREATE TABLE handle (ROWID INTEGER PRIMARY KEY, id TEXT NOT NULL);
+            CREATE TABLE chat (ROWID INTEGER PRIMARY KEY, chat_identifier TEXT, display_name TEXT);
+            CREATE TABLE chat_handle_join (chat_id INTEGER, handle_id INTEGER);
+            """
+        )
+        conn.execute("INSERT INTO handle (ROWID, id) VALUES (1, '+15551111111'), (2, 'emma@example.com')")
+        conn.execute(
+            "INSERT INTO chat (ROWID, chat_identifier, display_name) VALUES (1, '+15551111111', 'Emma Cruz'), (2, 'emma@example.com', 'Emma Cruz')"
+        )
+        conn.execute("INSERT INTO chat_handle_join (chat_id, handle_id) VALUES (1, 1), (2, 2)")
+        directory = ContactDirectory(conn)
+        handles = db.handles_for_contact(conn, directory, "+15551111111")
+        assert set(handles) == {"+15551111111", "emma@example.com"}
+
+    def test_person_message_counts_skips_decoded_when_disabled(self):
+        conn = self._make_db()
+        for i in range(1, 6):
+            self._insert_message(conn, i, f"message {i}", 0)
+        directory = ContactDirectory(conn)
+        quick = db.person_message_counts(
+            conn, directory, "+15551234567", count_decoded=False
+        )
+        assert quick["total"] == 5
+        assert quick["decoded"] is None
+        deep = db.person_message_counts(
+            conn, directory, "+15551234567", count_decoded=True
+        )
+        assert deep["decoded"] == 5
+
+    def test_messages_for_person_respects_limit(self):
+        conn = self._make_db()
+        for i in range(1, 11):
+            self._insert_message(conn, i, f"word{i}", 0)
+        directory = ContactDirectory(conn)
+        quick = db.messages_for_person(conn, directory, "+15551234567", limit=3)
+        assert len(quick) == 3
+        full = db.messages_for_person(conn, directory, "+15551234567", limit=None)
+        assert len(full) == 10
+
+
+def _make_attributed_body(text: str) -> bytes:
+    body = text.encode("utf-8")
+    n = len(body)
+    if n < 0x80:
+        length = bytes([n])
+    elif n < 0x1_0000:
+        length = b"\x81" + n.to_bytes(2, "little")
+    else:
+        length = b"\x82" + n.to_bytes(4, "little")
+    header = (
+        b"\x04\x0bstreamtyped\x81\xe8\x03\x84\x01@\x84\x84\x84"
+        b"\x12NSAttributedString\x00\x84\x84\x08NSObject\x00\x85\x92\x84\x84\x84"
+        b"\x0eNSString\x01\x94\x84\x01+"
+    )
+    trailer = b"\x86\x84\x02iI\x01\x00\x84\x84\x08NSDictionary\x00\x94\x84\x01i\x01\x86"
+    return header + length + body + trailer
+
+
+class TestAttributedBodyDecoding(TestDatabaseReactions):
+    def test_short_message(self):
+        blob = _make_attributed_body("hey what are you doing tonight")
+        assert db.decode_attributed_body(blob) == "hey what are you doing tonight"
+
+    def test_long_message_two_byte_length(self):
+        text = "babes " * 300  # > 127 bytes -> 0x81 + 2-byte length
+        blob = _make_attributed_body(text.strip())
+        decoded = db.decode_attributed_body(blob)
+        assert decoded is not None
+        assert decoded.count("babes") == 300
+
+    def test_unicode_and_emoji(self):
+        text = "café ☕ let's go 🚗 mañana"
+        blob = _make_attributed_body(text)
+        assert db.decode_attributed_body(blob) == text
+
+    def test_message_text_prefers_text_column(self):
+        # message_text should use text column when it is clean
+        class Row(dict):
+            def keys(self):  # sqlite3.Row-like
+                return list(super().keys())
+        row = Row(text="plain text wins", attributedBody=_make_attributed_body("ignored"),
+                  associated_message_type=0)
+        assert db.message_text(row) == "plain text wins"
+
+    def test_message_text_uses_attributed_body_when_text_null(self):
+        class Row(dict):
+            def keys(self):
+                return list(super().keys())
+        row = Row(text=None, attributedBody=_make_attributed_body("from blob body"),
+                  associated_message_type=0)
+        assert db.message_text(row) == "from blob body"
+
+    def test_tapback_still_filtered_even_if_in_blob(self):
+        class Row(dict):
+            def keys(self):
+                return list(super().keys())
+        row = Row(text=None, attributedBody=_make_attributed_body('Loved "dinner?"'),
+                  associated_message_type=2000)
+        assert db.message_text(row) is None
+
+    def test_non_string_blob_returns_none(self):
+        # attachment-only / empty payloads should decode to None, not garbage
+        assert db.decode_attributed_body(b"\x04\x0bstreamtyped\x81\xe8\x03") is None
+
+    def test_garbage_metadata_not_returned(self):
+        # NSDictionary / archiver keys must never surface as "text"
+        blob = b"\x04\x0bstreamtyped\x84\x84\x0eNSDictionary\x00\x94\x84\x01i\x01\x86"
+        assert db.decode_attributed_body(blob) is None
+
+    def test_keyed_archive_blob_returns_none(self):
+        # NSKeyedArchiver payloads leak $archiver/$objects/$top/$version tokens.
+        blob = (
+            b"bplist00\xd4\x01\x02\x03\x04$version$archiver$top$objects"
+            b"NSKeyedArchiver good morning ems"
+        )
+        assert db.decode_attributed_body(blob) is None
+
+    def test_archiver_tokens_filtered_from_text_check(self):
+        assert not db.looks_like_message_text("versiony archivert topx objects")
+        assert not db.looks_like_message_text("$archiver")
+        assert db.looks_like_message_text("good morning babes")
+
+    def test_full_scan_decodes_attributed_body_rows(self):
+        conn = self._make_db()  # existing fixture with handle/chat/joins
+        sentences = [f"message number {i} about pizza" for i in range(1, 51)]
+        for i, s in enumerate(sentences, start=1):
+            conn.execute(
+                "INSERT INTO message (ROWID, text, attributedBody, is_from_me, date, handle_id, associated_message_type) "
+                "VALUES (?, NULL, ?, 0, ?, 1, 0)",
+                (i, _make_attributed_body(s), 700000000 + i),
+            )
+            conn.execute("INSERT INTO chat_message_join (chat_id, message_id) VALUES (1, ?)", (i,))
+        texts = db.messages_for_contact(conn, "+15551234567", limit=None)
+        assert len(texts) == 50            # not 0, not a handful
+        assert "pizza" in " ".join(texts)
+
 
 class TestGCS:
     SAMPLE = [
@@ -209,6 +381,10 @@ class TestGCS:
     def test_merge_texts(self):
         merged = gcs.merge_texts(["local one"], ["remote two"], limit=10)
         assert merged == ["local one", "remote two"]
+
+    def test_merge_texts_dedupes_gcs_overlap(self):
+        merged = gcs.merge_texts(["babes", "hello"], ["babes", "world"], limit=None)
+        assert merged == ["babes", "hello", "world"]
 
     def test_index_chat_db(self, tmp_path):
         path = tmp_path / "chat.db"

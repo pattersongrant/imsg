@@ -259,7 +259,7 @@ def _merge_stats(existing: dict[str, GCSContactStats], incoming: list[GCSContact
         stats.texts.extend(item.texts)
 
 
-def index_chat_db(db_path: Path, *, text_limit: int = 800) -> list[GCSContactStats]:
+def index_chat_db(db_path: Path, *, text_limit: int | None = None) -> list[GCSContactStats]:
     """Index a chat.db file the same way the local app does."""
     from imsg import db
 
@@ -402,20 +402,28 @@ def contact_stats_from_gcs(
     return list(index.contacts)
 
 
-def texts_for_handle(handle: str, *, limit: int = 800) -> list[str]:
+def texts_for_handle(handle: str, *, limit: int | None = None) -> list[str]:
     index = get_index()
     if not index:
         return []
     texts = index.texts_by_handle.get(handle, [])
+    if limit is None:
+        return list(texts)
     return texts[:limit]
 
 
-def merge_texts(local: list[str], remote: list[str], *, limit: int = 800) -> list[str]:
+def merge_texts(local: list[str], remote: list[str], *, limit: int | None = None) -> list[str]:
     if not remote:
-        return local[:limit]
+        return list(local if limit is None else local[:limit])
     if not local:
-        return remote[:limit]
-    return (local + remote)[:limit]
+        return list(remote if limit is None else remote[:limit])
+    # Skip GCS rows already present locally (e.g. synced chat.db backup).
+    local_set = set(local)
+    deduped_remote = [text for text in remote if text not in local_set]
+    combined = local + deduped_remote
+    if limit is None:
+        return combined
+    return combined[:limit]
 
 
 def merge_contact_stats(local: list[dict], remote: list[dict]) -> list[dict]:

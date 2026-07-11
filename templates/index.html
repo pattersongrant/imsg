@@ -38,6 +38,7 @@
       <button class="tab" data-tab="bubbles">People Map</button>
       <button class="tab" data-tab="topics">Topics</button>
       <button class="tab" data-tab="activity">Activity</button>
+      <button class="tab" data-tab="timeline">Timeline</button>
     </nav>
 
     <section id="tab-contacts" class="tab-panel active">
@@ -76,6 +77,27 @@
       <div class="card">
         <h2>Messages over time</h2>
         <canvas id="activity-chart" height="100"></canvas>
+      </div>
+    </section>
+
+    <section id="tab-timeline" class="tab-panel">
+      <div class="card">
+        <div class="timeline-header">
+          <h2>Conversation timeline</h2>
+          <div class="timeline-controls">
+            <div class="toggle-group" id="timeline-bucket-toggle">
+              <button class="toggle-btn active" data-value="month">Monthly</button>
+              <button class="toggle-btn" data-value="year">Yearly</button>
+            </div>
+            <div class="toggle-group" id="timeline-limit-toggle">
+              <button class="toggle-btn active" data-value="10">Top 10</button>
+              <button class="toggle-btn" data-value="25">Top 25</button>
+            </div>
+          </div>
+        </div>
+        <p class="hint">Messages per period for your most-messaged contacts — see when each conversation started, peaked, and died off. DM + group history from your local chat.db; hover to compare who was active at the same time.</p>
+        <div id="timeline-chart" class="timeline-chart"></div>
+        <div id="timeline-legend" class="timeline-legend"></div>
       </div>
     </section>
   </main>

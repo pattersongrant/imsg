@@ -402,6 +402,72 @@ def group_chat_stats(conn: sqlite3.Connection, directory: ContactDirectory | Non
     return rows
 
 
+def contact_timeline(
+    conn: sqlite3.Connection,
+    directory: ContactDirectory,
+    identifier: str,
+    *,
+    is_group: bool = False,
+    bucket: str = "month",
+) -> dict[str, int]:
+    """Message counts per period (month or year) for one person or group chat."""
+    fmt = "%Y" if bucket == "year" else "%Y-%m"
+    buckets: dict[str, int] = {}
+
+    if is_group:
+        if not _has_table(conn, "chat"):
+            return buckets
+        sql = f"""
+            SELECT DISTINCT m.ROWID AS rowid, m.date
+            FROM chat c
+            JOIN chat_message_join cmj ON cmj.chat_id = c.ROWID
+            JOIN message m ON cmj.message_id = m.ROWID
+            WHERE (c.chat_identifier = ? OR c.display_name = ?) AND {_content_filter(conn)}
+        """
+        rows = conn.execute(sql, (identifier, identifier))
+    else:
+        handles = handles_for_contact(conn, directory, identifier)
+        placeholders = ",".join("?" * len(handles))
+        sql = f"""
+            WITH {_dm_chat_cte()}
+            SELECT DISTINCT m.ROWID AS rowid, m.date
+            FROM dm_chat d
+            JOIN handle h ON d.handle_id = h.ROWID
+            JOIN chat_message_join cmj ON cmj.chat_id = d.chat_id
+            JOIN message m ON cmj.message_id = m.ROWID
+            WHERE h.id IN ({placeholders}) AND {_content_filter(conn)}
+        """
+        rows = conn.execute(sql, handles)
+
+    seen_rowids: set[int] = set()
+    for row in rows:
+        rowid = row["rowid"]
+        if rowid in seen_rowids:
+            continue
+        seen_rowids.add(rowid)
+        dt = apple_timestamp_to_datetime(row["date"])
+        if not dt:
+            continue
+        key = dt.strftime(fmt)
+        buckets[key] = buckets.get(key, 0) + 1
+    return buckets
+
+
+def group_message_counts(conn: sqlite3.Connection, chat_identifier: str) -> dict[str, int]:
+    """Total decodable-eligible row count for a group chat (cheap COUNT, no decoding)."""
+    if not _has_table(conn, "chat"):
+        return {"total": 0}
+    sql = f"""
+        SELECT COUNT(DISTINCT m.ROWID)
+        FROM chat c
+        JOIN chat_message_join cmj ON cmj.chat_id = c.ROWID
+        JOIN message m ON cmj.message_id = m.ROWID
+        WHERE (c.chat_identifier = ? OR c.display_name = ?) AND {_content_filter(conn)}
+    """
+    total = conn.execute(sql, (chat_identifier, chat_identifier)).fetchone()[0]
+    return {"total": total}
+
+
 def monthly_activity(conn: sqlite3.Connection) -> list[dict]:
     sql = f"""
         SELECT m.date

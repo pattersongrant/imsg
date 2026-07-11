@@ -6,6 +6,13 @@ let contactsCache = [];
 let activityCache = [];
 let topicsCache = null;
 let bubblesCache = [];
+let timelineCache = null;
+let timelineLoaded = false;
+let timelineBucket = "month";
+let timelineLimit = 10;
+
+const TIMELINE_COLORS = ["#3987e5", "#199e70", "#c98500", "#008300", "#9085e9", "#e66767", "#d55181", "#d95926"];
+const TIMELINE_MUTED = "rgba(139, 146, 168, 0.35)";
 
 let anonymousMode = localStorage.getItem("anonymousMode") === "1";
 const aliasMap = new Map();
@@ -212,13 +219,11 @@ async function selectContact(contact, rowEl, { deep = false } = {}) {
     }
     html += `</div>`;
 
-    if (!data.is_group) {
-      if (isDeep) {
-        html += `<div class="deep-scan-row"><span class="hint">Deep scan complete — every message analyzed.</span></div>`;
-      } else {
-        const label = total ? `Deep index — scan all ${maskCount(total)} messages` : "Deep index — scan every message";
-        html += `<div class="deep-scan-row"><button id="deep-scan-btn" class="deep-scan-btn">${escapeHtml(label)}</button></div>`;
-      }
+    if (isDeep) {
+      html += `<div class="deep-scan-row"><span class="hint">Deep scan complete — every message analyzed.</span></div>`;
+    } else {
+      const label = total ? `Deep index — scan all ${maskCount(total)} messages` : "Deep index — scan every message";
+      html += `<div class="deep-scan-row"><button id="deep-scan-btn" class="deep-scan-btn">${escapeHtml(label)}</button></div>`;
     }
 
     html += '<div id="detail-words" class="tag-cloud"></div>';
@@ -413,11 +418,284 @@ async function loadTopics() {
   }
 }
 
+function niceCeil(n) {
+  if (n <= 5) return 5;
+  const magnitude = Math.pow(10, Math.floor(Math.log10(n)));
+  const residual = n / magnitude;
+  let niceResidual;
+  if (residual <= 1) niceResidual = 1;
+  else if (residual <= 2) niceResidual = 2;
+  else if (residual <= 5) niceResidual = 5;
+  else niceResidual = 10;
+  return niceResidual * magnitude;
+}
+
+function periodLabel(period, bucket) {
+  if (bucket === "year") return period;
+  const [y, m] = period.split("-");
+  const d = new Date(Number(y), Number(m) - 1, 1);
+  return d.toLocaleDateString(undefined, { month: "short", year: "2-digit" });
+}
+
+function renderTimeline(data) {
+  timelineCache = data;
+  const container = $("#timeline-chart");
+  const legend = $("#timeline-legend");
+  const contacts = data.contacts || [];
+
+  if (!contacts.length) {
+    container.innerHTML = '<p class="loading">No timeline data found.</p>';
+    legend.innerHTML = "";
+    return;
+  }
+
+  const periodSet = new Set();
+  contacts.forEach(c => c.series.forEach(s => periodSet.add(s.period)));
+  const periods = Array.from(periodSet).sort();
+
+  if (!periods.length) {
+    container.innerHTML = '<p class="loading">No dated messages found.</p>';
+    legend.innerHTML = "";
+    return;
+  }
+
+  const width = Math.max(container.clientWidth || 900, 320);
+  const height = 360;
+  const margin = { top: 16, right: 16, bottom: 32, left: 44 };
+  const plotW = width - margin.left - margin.right;
+  const plotH = height - margin.top - margin.bottom;
+
+  const maxCount = Math.max(1, ...contacts.flatMap(c => c.series.map(s => s.count)));
+  const yMax = niceCeil(maxCount);
+
+  const xStep = periods.length > 1 ? plotW / (periods.length - 1) : 0;
+  const xAt = i => margin.left + (periods.length > 1 ? i * xStep : plotW / 2);
+  const yAt = v => margin.top + plotH - (v / yMax) * plotH;
+
+  const seriesByContact = contacts.map((c, i) => {
+    const byPeriod = new Map(c.series.map(s => [s.period, s.count]));
+    const points = periods.map(p => byPeriod.get(p) || 0);
+    const color = i < 8 ? TIMELINE_COLORS[i] : TIMELINE_MUTED;
+    return { contact: c, points, color, highlighted: i < 8 };
+  });
+
+  const svgNS = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(svgNS, "svg");
+  svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
+  svg.setAttribute("role", "img");
+  svg.setAttribute("aria-label", "Message count per period by contact");
+  svg.style.height = `${height}px`;
+
+  const ticks = 4;
+  for (let t = 0; t <= ticks; t++) {
+    const v = (yMax / ticks) * t;
+    const y = yAt(v);
+    const line = document.createElementNS(svgNS, "line");
+    line.setAttribute("x1", margin.left);
+    line.setAttribute("x2", width - margin.right);
+    line.setAttribute("y1", y);
+    line.setAttribute("y2", y);
+    line.setAttribute("class", "timeline-grid");
+    svg.appendChild(line);
+
+    const label = document.createElementNS(svgNS, "text");
+    label.setAttribute("x", margin.left - 8);
+    label.setAttribute("y", y);
+    label.setAttribute("class", "timeline-axis-label");
+    label.setAttribute("text-anchor", "end");
+    label.setAttribute("dominant-baseline", "middle");
+    label.textContent = anonymousMode ? maskCount(Math.round(v)) : formatNumber(Math.round(v));
+    svg.appendChild(label);
+  }
+
+  const maxLabels = Math.min(periods.length, Math.max(4, Math.floor(plotW / 70)));
+  const labelStep = Math.max(1, Math.ceil(periods.length / maxLabels));
+  periods.forEach((p, i) => {
+    if (i % labelStep !== 0 && i !== periods.length - 1) return;
+    const label = document.createElementNS(svgNS, "text");
+    label.setAttribute("x", xAt(i));
+    label.setAttribute("y", height - margin.bottom + 18);
+    label.setAttribute("class", "timeline-axis-label");
+    label.setAttribute("text-anchor", "middle");
+    label.textContent = periodLabel(p, data.bucket);
+    svg.appendChild(label);
+  });
+
+  // Draw muted (overflow) series first so highlighted lines stay on top.
+  const ordered = [...seriesByContact].sort((a, b) => (a.highlighted === b.highlighted ? 0 : a.highlighted ? 1 : -1));
+  ordered.forEach(s => {
+    const d = s.points.map((v, i) => `${i === 0 ? "M" : "L"}${xAt(i)},${yAt(v)}`).join(" ");
+    const path = document.createElementNS(svgNS, "path");
+    path.setAttribute("d", d);
+    path.setAttribute("class", "timeline-line" + (s.highlighted ? "" : " muted"));
+    path.setAttribute("stroke", s.color);
+    svg.appendChild(path);
+  });
+
+  const hit = document.createElementNS(svgNS, "rect");
+  hit.setAttribute("x", margin.left);
+  hit.setAttribute("y", margin.top);
+  hit.setAttribute("width", Math.max(plotW, 1));
+  hit.setAttribute("height", Math.max(plotH, 1));
+  hit.setAttribute("fill", "transparent");
+  svg.appendChild(hit);
+
+  container.innerHTML = "";
+  container.appendChild(svg);
+
+  const overlay = document.createElement("div");
+  overlay.className = "timeline-overlay";
+  const crosshair = document.createElement("div");
+  crosshair.className = "timeline-crosshair hidden";
+  const tooltip = document.createElement("div");
+  tooltip.className = "timeline-tooltip hidden";
+  overlay.appendChild(crosshair);
+  overlay.appendChild(tooltip);
+  container.appendChild(overlay);
+
+  function showTooltip(evt) {
+    const rect = svg.getBoundingClientRect();
+    const scale = width / rect.width;
+    const mouseX = (evt.clientX - rect.left) * scale;
+    let idx = xStep > 0 ? Math.round((mouseX - margin.left) / xStep) : 0;
+    idx = Math.max(0, Math.min(periods.length - 1, idx));
+
+    const px = (xAt(idx) / width) * rect.width;
+    crosshair.style.left = `${px}px`;
+    crosshair.classList.remove("hidden");
+
+    const rows = seriesByContact
+      .map(s => ({
+        name: maskName(s.contact.id, s.contact.name, !!s.contact.is_group),
+        color: s.color,
+        value: s.points[idx],
+      }))
+      .filter(r => r.value > 0)
+      .sort((a, b) => b.value - a.value);
+
+    const shown = rows.slice(0, 8);
+    const extra = rows.length - shown.length;
+
+    tooltip.innerHTML = "";
+    const periodEl = document.createElement("div");
+    periodEl.className = "timeline-tooltip-period";
+    periodEl.textContent = periodLabel(periods[idx], data.bucket);
+    tooltip.appendChild(periodEl);
+
+    if (!rows.length) {
+      const empty = document.createElement("div");
+      empty.className = "timeline-tooltip-empty";
+      empty.textContent = "No messages";
+      tooltip.appendChild(empty);
+    } else {
+      shown.forEach(r => {
+        const row = document.createElement("div");
+        row.className = "timeline-tooltip-row";
+        const key = document.createElement("span");
+        key.className = "timeline-tooltip-key";
+        key.style.background = r.color;
+        const name = document.createElement("span");
+        name.className = "timeline-tooltip-name";
+        name.textContent = r.name;
+        const value = document.createElement("span");
+        value.className = "timeline-tooltip-value";
+        value.textContent = maskCount(r.value);
+        row.append(key, name, value);
+        tooltip.appendChild(row);
+      });
+      if (extra > 0) {
+        const more = document.createElement("div");
+        more.className = "timeline-tooltip-more";
+        more.textContent = `+${extra} more`;
+        tooltip.appendChild(more);
+      }
+    }
+    tooltip.classList.remove("hidden");
+
+    const tooltipWidth = 200;
+    let left = px + 12;
+    if (left + tooltipWidth > rect.width) left = px - tooltipWidth - 12;
+    tooltip.style.left = `${Math.max(0, left)}px`;
+    tooltip.style.top = `${margin.top}px`;
+  }
+
+  function hideTooltip() {
+    crosshair.classList.add("hidden");
+    tooltip.classList.add("hidden");
+  }
+
+  svg.addEventListener("pointermove", showTooltip);
+  svg.addEventListener("pointerleave", hideTooltip);
+
+  const highlighted = seriesByContact.filter(s => s.highlighted);
+  const mutedCount = seriesByContact.length - highlighted.length;
+  legend.innerHTML = "";
+  highlighted.forEach(s => {
+    const item = document.createElement("div");
+    item.className = "timeline-legend-item";
+    const key = document.createElement("span");
+    key.className = "timeline-legend-key";
+    key.style.background = s.color;
+    const name = document.createTextNode(" " + maskName(s.contact.id, s.contact.name, !!s.contact.is_group) + " ");
+    const total = document.createElement("span");
+    total.className = "timeline-legend-total";
+    total.textContent = maskCount(s.contact.total);
+    item.append(key, name, total);
+    legend.appendChild(item);
+  });
+  if (mutedCount > 0) {
+    const item = document.createElement("div");
+    item.className = "timeline-legend-item muted";
+    const key = document.createElement("span");
+    key.className = "timeline-legend-key";
+    key.style.background = TIMELINE_MUTED;
+    const label = document.createTextNode(` +${mutedCount} more`);
+    item.append(key, label);
+    legend.appendChild(item);
+  }
+}
+
+async function loadTimeline() {
+  const container = $("#timeline-chart");
+  const legend = $("#timeline-legend");
+  container.innerHTML = '<p class="loading">Loading timeline…</p>';
+  legend.innerHTML = "";
+  try {
+    const data = await fetchJSON(`/api/timeline?limit=${timelineLimit}&bucket=${timelineBucket}`);
+    timelineLoaded = true;
+    renderTimeline(data);
+  } catch (err) {
+    container.innerHTML = `<p class="hint">${escapeHtml(err.message)}</p>`;
+  }
+}
+
+function setupTimelineControls() {
+  $$("#timeline-bucket-toggle .toggle-btn").forEach(btn => {
+    btn.addEventListener("click", () => {
+      if (btn.classList.contains("active")) return;
+      $$("#timeline-bucket-toggle .toggle-btn").forEach(b => b.classList.remove("active"));
+      btn.classList.add("active");
+      timelineBucket = btn.dataset.value;
+      loadTimeline();
+    });
+  });
+  $$("#timeline-limit-toggle .toggle-btn").forEach(btn => {
+    btn.addEventListener("click", () => {
+      if (btn.classList.contains("active")) return;
+      $$("#timeline-limit-toggle .toggle-btn").forEach(b => b.classList.remove("active"));
+      btn.classList.add("active");
+      timelineLimit = Number(btn.dataset.value);
+      loadTimeline();
+    });
+  });
+}
+
 function refreshAnonymousViews() {
   if (contactsCache.length) renderContacts(contactsCache);
   if (activityCache.length) renderActivity(activityCache);
   if (topicsCache) renderTopics(topicsCache);
   if (bubblesCache.length) renderBubbles(bubblesCache);
+  if (timelineCache) renderTimeline(timelineCache);
 }
 
 function setupAnonymousToggle() {
@@ -444,6 +722,9 @@ function setupTabs() {
       if (tab.dataset.tab === "bubbles" && !bubblesLoaded) {
         loadBubbles();
       }
+      if (tab.dataset.tab === "timeline" && !timelineLoaded) {
+        loadTimeline();
+      }
     });
   });
 }
@@ -458,6 +739,7 @@ function renderSummaryStats(s) {
 async function init() {
   setupAnonymousToggle();
   setupTabs();
+  setupTimelineControls();
 
   try {
     const status = await fetchJSON("/api/status");

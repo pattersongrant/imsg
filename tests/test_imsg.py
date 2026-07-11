@@ -312,6 +312,218 @@ class TestAttributedBodyDecoding(TestDatabaseReactions):
         assert "pizza" in " ".join(texts)
 
 
+class TestContactTimeline(TestDatabaseReactions):
+    def _insert_at(self, conn, rowid, when, associated_type=0, chat_id=1, handle_id=1):
+        ts = int((when - db.APPLE_EPOCH).total_seconds())
+        conn.execute(
+            """
+            INSERT INTO message (ROWID, text, is_from_me, date, handle_id, associated_message_type)
+            VALUES (?, ?, 0, ?, ?, ?)
+            """,
+            (rowid, f"message {rowid}", ts, handle_id, associated_type),
+        )
+        conn.execute(
+            "INSERT INTO chat_message_join (chat_id, message_id) VALUES (?, ?)",
+            (chat_id, rowid),
+        )
+
+    def test_groups_by_month(self):
+        conn = self._make_db()
+        directory = ContactDirectory(conn)
+        self._insert_at(conn, 1, datetime(2024, 1, 15))
+        self._insert_at(conn, 2, datetime(2024, 1, 20))
+        self._insert_at(conn, 3, datetime(2024, 2, 5))
+
+        buckets = db.contact_timeline(conn, directory, "+15551234567", bucket="month")
+        assert buckets == {"2024-01": 2, "2024-02": 1}
+
+    def test_groups_by_year(self):
+        conn = self._make_db()
+        directory = ContactDirectory(conn)
+        self._insert_at(conn, 1, datetime(2023, 11, 1))
+        self._insert_at(conn, 2, datetime(2024, 1, 15))
+        self._insert_at(conn, 3, datetime(2024, 12, 20))
+
+        buckets = db.contact_timeline(conn, directory, "+15551234567", bucket="year")
+        assert buckets == {"2023": 1, "2024": 2}
+
+    def test_dedupes_duplicate_chat_message_join_rows(self):
+        conn = self._make_db()
+        directory = ContactDirectory(conn)
+        self._insert_at(conn, 1, datetime(2024, 3, 1))
+        # A stray extra join row for the same message shouldn't double-count it.
+        conn.execute("INSERT INTO chat_message_join (chat_id, message_id) VALUES (1, 1)")
+
+        buckets = db.contact_timeline(conn, directory, "+15551234567", bucket="month")
+        assert buckets == {"2024-03": 1}
+
+    def test_excludes_reaction_rows(self):
+        conn = self._make_db()
+        directory = ContactDirectory(conn)
+        self._insert_at(conn, 1, datetime(2024, 4, 1), associated_type=0)
+        self._insert_at(conn, 2, datetime(2024, 4, 1), associated_type=2000)  # tapback
+
+        buckets = db.contact_timeline(conn, directory, "+15551234567", bucket="month")
+        assert buckets == {"2024-04": 1}
+
+    def test_unknown_contact_returns_empty(self):
+        conn = self._make_db()
+        directory = ContactDirectory(conn)
+        buckets = db.contact_timeline(conn, directory, "+15559999999", bucket="month")
+        assert buckets == {}
+
+
+class TestTimelineEndpoint:
+    def _make_db(self):
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.executescript(
+            """
+            CREATE TABLE handle (ROWID INTEGER PRIMARY KEY, id TEXT NOT NULL);
+            CREATE TABLE chat (ROWID INTEGER PRIMARY KEY, chat_identifier TEXT, display_name TEXT);
+            CREATE TABLE chat_handle_join (chat_id INTEGER, handle_id INTEGER);
+            CREATE TABLE chat_message_join (chat_id INTEGER, message_id INTEGER);
+            CREATE TABLE message (
+                ROWID INTEGER PRIMARY KEY, text TEXT, attributedBody BLOB,
+                is_from_me INTEGER, date INTEGER, handle_id INTEGER,
+                associated_message_type INTEGER
+            );
+            """
+        )
+        conn.execute("INSERT INTO handle (ROWID, id) VALUES (1, '+15551111111'), (2, '+15552222222')")
+        conn.execute(
+            "INSERT INTO chat (ROWID, chat_identifier, display_name) VALUES "
+            "(1, '+15551111111', 'Alex'), (2, '+15552222222', 'Sam')"
+        )
+        conn.execute("INSERT INTO chat_handle_join (chat_id, handle_id) VALUES (1, 1), (2, 2)")
+
+        ts = int((datetime(2024, 5, 1) - db.APPLE_EPOCH).total_seconds())
+        for rowid in (1, 2, 3):
+            conn.execute(
+                "INSERT INTO message (ROWID, text, is_from_me, date, handle_id, associated_message_type) "
+                "VALUES (?, ?, 0, ?, 1, 0)",
+                (rowid, f"alex {rowid}", ts),
+            )
+            conn.execute("INSERT INTO chat_message_join (chat_id, message_id) VALUES (1, ?)", (rowid,))
+        conn.execute(
+            "INSERT INTO message (ROWID, text, is_from_me, date, handle_id, associated_message_type) "
+            "VALUES (4, 'sam 1', 0, ?, 2, 0)",
+            (ts,),
+        )
+        conn.execute("INSERT INTO chat_message_join (chat_id, message_id) VALUES (2, 4)")
+        return conn
+
+    def _patch(self, monkeypatch):
+        import app as app_module
+
+        conn = self._make_db()
+        monkeypatch.setattr(app_module.db, "connect", lambda *a, **kw: conn)
+        monkeypatch.delenv("GCS_BUCKET", raising=False)
+        app_module.gcs._index_cache = None
+        return app_module.app.test_client()
+
+    def test_respects_limit(self, monkeypatch):
+        client = self._patch(monkeypatch)
+        response = client.get("/api/timeline?limit=1&bucket=month")
+        assert response.status_code == 200
+        data = response.get_json()
+        assert data["bucket"] == "month"
+        assert len(data["contacts"]) == 1
+        assert data["contacts"][0]["name"] == "Alex"
+        assert data["contacts"][0]["total"] == 3
+        assert data["contacts"][0]["series"] == [{"period": "2024-05", "count": 3}]
+
+    def test_stable_ordering_by_total_desc(self, monkeypatch):
+        client = self._patch(monkeypatch)
+        response = client.get("/api/timeline?limit=25&bucket=month")
+        data = response.get_json()
+        names = [c["name"] for c in data["contacts"]]
+        assert names == ["Alex", "Sam"]
+
+    def test_yearly_bucket_param(self, monkeypatch):
+        client = self._patch(monkeypatch)
+        response = client.get("/api/timeline?limit=25&bucket=year")
+        data = response.get_json()
+        assert data["bucket"] == "year"
+        alex = next(c for c in data["contacts"] if c["name"] == "Alex")
+        assert alex["series"] == [{"period": "2024", "count": 3}]
+
+
+class TestGroupDeepScan:
+    def _make_db(self, n_messages=25):
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.executescript(
+            """
+            CREATE TABLE handle (ROWID INTEGER PRIMARY KEY, id TEXT NOT NULL);
+            CREATE TABLE chat (ROWID INTEGER PRIMARY KEY, chat_identifier TEXT, display_name TEXT);
+            CREATE TABLE chat_handle_join (chat_id INTEGER, handle_id INTEGER);
+            CREATE TABLE chat_message_join (chat_id INTEGER, message_id INTEGER);
+            CREATE TABLE message (
+                ROWID INTEGER PRIMARY KEY, text TEXT, attributedBody BLOB,
+                is_from_me INTEGER, date INTEGER, handle_id INTEGER,
+                associated_message_type INTEGER
+            );
+            """
+        )
+        conn.execute("INSERT INTO handle (ROWID, id) VALUES (1, '+15551111111'), (2, '+15552222222')")
+        conn.execute(
+            "INSERT INTO chat (ROWID, chat_identifier, display_name) VALUES (1, 'group-chat', 'Friends')"
+        )
+        conn.execute("INSERT INTO chat_handle_join (chat_id, handle_id) VALUES (1, 1), (1, 2)")
+        for i in range(1, n_messages + 1):
+            conn.execute(
+                "INSERT INTO message (ROWID, text, is_from_me, date, handle_id, associated_message_type) "
+                "VALUES (?, ?, 0, ?, 1, 0)",
+                (i, f"group message {i}", 700_000_000 + i),
+            )
+            conn.execute("INSERT INTO chat_message_join (chat_id, message_id) VALUES (1, ?)", (i,))
+        # A reaction row (newest by date) and a stray duplicate join — neither should count.
+        reaction_id = n_messages + 1
+        conn.execute(
+            "INSERT INTO message (ROWID, text, is_from_me, date, handle_id, associated_message_type) "
+            "VALUES (?, ?, 0, ?, 1, 2000)",
+            (reaction_id, 'Loved "group message 1"', 700_000_000 + reaction_id),
+        )
+        conn.execute("INSERT INTO chat_message_join (chat_id, message_id) VALUES (1, ?)", (reaction_id,))
+        conn.execute("INSERT INTO chat_message_join (chat_id, message_id) VALUES (1, 1)")
+        return conn
+
+    def test_group_message_counts_excludes_reactions_and_dedupes(self):
+        conn = self._make_db(n_messages=5)
+        assert db.group_message_counts(conn, "group-chat") == {"total": 5}
+
+    def test_group_message_counts_matches_display_name(self):
+        conn = self._make_db(n_messages=3)
+        assert db.group_message_counts(conn, "Friends") == {"total": 3}
+
+    def _client(self, monkeypatch, n_messages=25):
+        import app as app_module
+
+        conn = self._make_db(n_messages=n_messages)
+        monkeypatch.setattr(app_module.db, "connect", lambda *a, **kw: conn)
+        monkeypatch.delenv("GCS_BUCKET", raising=False)
+        app_module.gcs._index_cache = None
+        return app_module.app.test_client(), app_module.QUICK_MESSAGE_LIMIT
+
+    def test_quick_preview_reports_real_total_with_limited_decode(self, monkeypatch):
+        client, quick_limit = self._client(monkeypatch, n_messages=25)
+        response = client.get("/api/contact/group-chat")
+        data = response.get_json()
+        assert data["is_group"] is True
+        assert data["deep"] is False
+        assert data["topics"]["messages_total"] == 25
+        assert data["topics"]["messages_decoded"] == quick_limit
+
+    def test_deep_scan_returns_every_group_message(self, monkeypatch):
+        client, _ = self._client(monkeypatch, n_messages=25)
+        response = client.get("/api/contact/group-chat?deep=1")
+        data = response.get_json()
+        assert data["deep"] is True
+        assert data["topics"]["messages_total"] == 25
+        assert data["topics"]["messages_decoded"] == 25
+
+
 class TestGCS:
     SAMPLE = [
         {"handle": "+15551234567", "name": "Alex", "text": "hello", "is_from_me": True},

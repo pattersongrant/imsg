@@ -9,6 +9,8 @@
   <script src="https://cdn.jsdelivr.net/npm/d3@7/dist/d3.min.js"></script>
 </head>
 <body>
+  <canvas id="msg-bg" class="msg-bg" aria-hidden="true"></canvas>
+  <div class="app-shell">
   <header class="header">
     <div class="header-inner">
       <div class="header-top">
@@ -16,11 +18,16 @@
           <h1>iMessage Insights</h1>
           <p class="subtitle">Who you text most — and what you talk about. Everything stays on your Mac.</p>
         </div>
-        <label class="anon-toggle" title="Hide names, numbers, and message text for safe previews">
-          <input type="checkbox" id="anonymous-toggle" />
-          <span class="anon-switch"></span>
-          <span class="anon-label">Anonymous preview</span>
-        </label>
+        <div class="header-actions">
+          <button type="button" id="drop-messages-btn" class="drop-msg-btn" title="Drop more random messages into the background">
+            Drop messages
+          </button>
+          <label class="anon-toggle" title="Hide names, numbers, and message text for safe previews">
+            <input type="checkbox" id="anonymous-toggle" />
+            <span class="anon-switch"></span>
+            <span class="anon-label">Anonymous preview</span>
+          </label>
+        </div>
       </div>
     </div>
   </header>
@@ -107,7 +114,9 @@
   <footer class="footer">
     <span>Local only · reads ~/Library/Messages/chat.db · optional GCS merge via <code>GCS_BUCKET</code></span>
   </footer>
+  </div>
 
+  <script src="/static/message-bg.js"></script>
   <script src="/static/app.js"></script>
 </body>
 </html>

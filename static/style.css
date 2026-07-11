@@ -23,8 +23,25 @@ body {
   min-height: 100vh;
 }
 
+.msg-bg {
+  position: fixed;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  z-index: 0;
+  pointer-events: none;
+}
+
+.app-shell {
+  position: relative;
+  z-index: 1;
+  min-height: 100vh;
+}
+
 .header {
-  background: linear-gradient(135deg, #1a2238 0%, #0f1117 60%);
+  background: linear-gradient(135deg, rgba(26, 34, 56, 0.88) 0%, rgba(15, 17, 23, 0.75) 60%);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
   border-bottom: 1px solid var(--border);
   padding: 2rem 1.5rem;
 }
@@ -37,6 +54,38 @@ body {
   justify-content: space-between;
   gap: 1.5rem;
   flex-wrap: wrap;
+}
+
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+  flex-shrink: 0;
+  flex-wrap: wrap;
+}
+
+.drop-msg-btn {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 999px;
+  padding: 0.55rem 0.95rem;
+  font-size: 0.85rem;
+  font-family: var(--font);
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s, color 0.15s;
+  white-space: nowrap;
+}
+
+.drop-msg-btn:hover:not(:disabled) {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.drop-msg-btn:disabled {
+  opacity: 0.55;
+  cursor: wait;
 }
 
 .anon-toggle {
@@ -140,10 +189,12 @@ body.anonymous-mode .sensitive { filter: blur(6px); }
 }
 
 .stat-card {
-  background: var(--surface);
+  background: rgba(26, 29, 39, 0.82);
   border: 1px solid var(--border);
   border-radius: var(--radius);
   padding: 1rem 1.1rem;
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
 }
 
 .stat-card .value {
@@ -209,11 +260,13 @@ body.anonymous-mode .sensitive { filter: blur(6px); }
 }
 
 .card {
-  background: var(--surface);
+  background: rgba(26, 29, 39, 0.82);
   border: 1px solid var(--border);
   border-radius: var(--radius);
   padding: 1.25rem;
   margin-bottom: 1rem;
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
 }
 
 .card h2 {
@@ -365,6 +418,7 @@ body.anonymous-mode .sensitive { filter: blur(6px); }
   font-size: 0.8rem;
   border-top: 1px solid var(--border);
   margin-top: 2rem;
+  background: rgba(15, 17, 23, 0.5);
 }
 
 .bubble-chart {

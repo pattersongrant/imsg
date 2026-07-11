@@ -191,6 +191,18 @@ def bubbles():
         return jsonify({"ok": False, "message": str(exc)}), 403
 
 
+@app.route("/api/background-messages")
+def background_messages():
+    limit = min(int(request.args.get("limit", 60)), 100)
+    try:
+        conn, _ = _open()
+        messages = db.random_background_messages(conn, limit=limit)
+        conn.close()
+        return jsonify({"messages": messages})
+    except (db.AccessDeniedError, db.DatabaseError) as exc:
+        return jsonify({"ok": False, "message": str(exc), "messages": []}), 403
+
+
 @app.route("/api/activity")
 def activity():
     try:

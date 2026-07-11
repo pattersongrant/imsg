@@ -735,3 +735,31 @@ class TestTimeEstimate:
         assert summary["time_seconds"] == 1 * 20 + 2 * 12
         assert summary["time_display"] == "1 min"
         assert "20s sent" in summary["time_note"]
+
+
+class TestBackgroundMessages:
+    def test_random_background_messages(self):
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.executescript(
+            """
+            CREATE TABLE handle (ROWID INTEGER PRIMARY KEY, id TEXT NOT NULL);
+            CREATE TABLE message (
+                ROWID INTEGER PRIMARY KEY, text TEXT, attributedBody BLOB,
+                is_from_me INTEGER, date INTEGER, handle_id INTEGER,
+                associated_message_type INTEGER, service TEXT
+            );
+            """
+        )
+        conn.execute("INSERT INTO message (ROWID, text, is_from_me, service) VALUES (1, 'hello there', 1, 'iMessage')")
+        conn.execute("INSERT INTO message (ROWID, text, is_from_me, service) VALUES (2, 'see you tonight', 0, 'SMS')")
+        conn.execute("INSERT INTO message (ROWID, text, is_from_me, service) VALUES (3, 'Loved \"x\"', 0, 'iMessage')")
+
+        msgs = db.random_background_messages(conn, limit=10)
+        texts = {m["text"] for m in msgs}
+        types = {m["type"] for m in msgs}
+        assert "hello there" in texts
+        assert "see you tonight" in texts
+        assert "Loved" not in " ".join(texts)
+        assert "sent" in types
+        assert "sms" in types

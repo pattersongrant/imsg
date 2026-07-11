@@ -761,6 +761,9 @@ function setupAnonymousToggle() {
     resetAliases();
     updateAnonymousUI();
     refreshAnonymousViews();
+    window.dispatchEvent(new CustomEvent("anonymous-mode-changed", {
+      detail: { enabled: anonymousMode },
+    }));
   });
 }
 

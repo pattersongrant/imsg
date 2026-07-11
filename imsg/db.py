@@ -759,3 +759,44 @@ def database_summary(conn: sqlite3.Connection) -> dict:
     }
     summary.update(estimate_summary(sent=sent, received=received, total=total))
     return summary
+
+
+def _bubble_type(row: sqlite3.Row, columns: set[str]) -> str:
+    if "service" in columns:
+        service = row["service"]
+        if service and str(service).strip().lower() == "sms":
+            return "sms"
+    return "sent" if row["is_from_me"] else "received"
+
+
+def random_background_messages(conn: sqlite3.Connection, limit: int = 60) -> list[dict]:
+    """Random decoded messages suitable for the floating background bubbles."""
+    columns = _message_columns(conn)
+    service_sql = "m.service" if "service" in columns else "NULL AS service"
+    candidate_limit = max(limit * 4, 120)
+    sql = f"""
+        SELECT m.ROWID, m.text, m.attributedBody, m.is_from_me, {service_sql}
+        FROM message m
+        WHERE {_content_filter(conn)}
+        ORDER BY RANDOM()
+        LIMIT ?
+    """
+    results: list[dict] = []
+    seen_text: set[str] = set()
+    for row in conn.execute(sql, (candidate_limit,)):
+        text = message_text(row)
+        if not text:
+            continue
+        cleaned = " ".join(text.split())
+        if len(cleaned) < 2:
+            continue
+        key = cleaned.lower()
+        if key in seen_text:
+            continue
+        seen_text.add(key)
+        if len(cleaned) > 90:
+            cleaned = cleaned[:87].rstrip() + "…"
+        results.append({"text": cleaned, "type": _bubble_type(row, columns)})
+        if len(results) >= limit:
+            break
+    return results

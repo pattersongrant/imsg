@@ -93,7 +93,8 @@ def _contact_texts(
     deep = limit is None
     if is_group:
         texts = db.messages_for_contact(conn, handle, limit=limit, dm_only=False)
-        counts = {"total": len(texts), "decoded": len(texts)}
+        counts = db.group_message_counts(conn, handle)
+        counts["decoded"] = len(texts)
     else:
         counts = db.person_message_counts(
             conn, directory, handle, include_groups=True, count_decoded=deep
@@ -197,6 +198,54 @@ def activity():
         data = db.monthly_activity(conn)
         conn.close()
         return jsonify({"activity": data})
+    except (db.AccessDeniedError, db.DatabaseError) as exc:
+        return jsonify({"ok": False, "message": str(exc)}), 403
+
+
+@app.route("/api/timeline")
+def timeline():
+    """Per-contact message counts over time, for the currently ranked contact list.
+
+    Series are built from the local chat.db only (not merged with GCS-indexed
+    history), even when GCS merging affects which contacts make the top-N cut.
+    """
+    limit = min(int(request.args.get("limit", 25)), 50)
+    bucket = request.args.get("bucket", "month")
+    if bucket not in ("month", "year"):
+        bucket = "month"
+    merge_gcs = request.args.get("gcs", "1") == "1"
+    try:
+        conn, directory = _open()
+        combined = _load_contacts(
+            conn, directory, include_groups=True, merge_gcs=merge_gcs
+        )
+        top = combined[:limit]
+        contacts_payload = []
+        for row in top:
+            # For groups, "handle" is the chat's unique chat_identifier; "contact"
+            # is just the display label, which two distinct group chats can share.
+            # Prefer "handle" so the timeline query targets one specific chat.
+            identifier = row.get("handle") or row.get("contact")
+            is_group = bool(row.get("is_group"))
+            buckets = db.contact_timeline(
+                conn, directory, identifier, is_group=is_group, bucket=bucket
+            )
+            series = [{"period": k, "count": buckets[k]} for k in sorted(buckets)]
+            contacts_payload.append(
+                {
+                    "id": row.get("handle") or identifier,
+                    "name": row.get("display") or row.get("name") or identifier,
+                    "is_group": is_group,
+                    # Matches the "Most messaged" ranking total, not sum(series): a
+                    # person's timeline series is merged across all of their handles
+                    # (via handles_for_contact), while the ranked list's total counts
+                    # each raw handle separately, so the two can diverge slightly.
+                    "total": row.get("total", sum(buckets.values())),
+                    "series": series,
+                }
+            )
+        conn.close()
+        return jsonify({"bucket": bucket, "contacts": contacts_payload})
     except (db.AccessDeniedError, db.DatabaseError) as exc:
         return jsonify({"ok": False, "message": str(exc)}), 403
 

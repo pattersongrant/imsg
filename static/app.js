@@ -195,7 +195,11 @@ async function selectContact(contact, rowEl) {
     const display = maskName(contact, data.display || data.name || contact, !!data.is_group);
     title.textContent = display;
 
-    let html = `<div class="section-label">Top words${data.is_group ? " (group)" : " (DMs)"}</div>`;
+    let html = `<div class="section-label">Top words${data.is_group ? " (group)" : " (DMs)"}`;
+    if (topics.message_count) {
+      html += ` · ${maskCount(topics.message_count)} messages analyzed`;
+    }
+    html += `</div>`;
     html += '<div id="detail-words" class="tag-cloud"></div>';
     if (topics.phrases && topics.phrases.length) {
       html += '<div class="section-label">Common phrases</div>';

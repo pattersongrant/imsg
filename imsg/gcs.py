@@ -259,7 +259,7 @@ def _merge_stats(existing: dict[str, GCSContactStats], incoming: list[GCSContact
         stats.texts.extend(item.texts)
 
 
-def index_chat_db(db_path: Path, *, text_limit: int = 800) -> list[GCSContactStats]:
+def index_chat_db(db_path: Path, *, text_limit: int | None = None) -> list[GCSContactStats]:
     """Index a chat.db file the same way the local app does."""
     from imsg import db
 
@@ -412,7 +412,7 @@ def texts_for_handle(handle: str, *, limit: int | None = None) -> list[str]:
     return texts[:limit]
 
 
-def merge_texts(local: list[str], remote: list[str], *, limit: int | None = 800) -> list[str]:
+def merge_texts(local: list[str], remote: list[str], *, limit: int | None = None) -> list[str]:
     if not remote:
         return list(local if limit is None else local[:limit])
     if not local:

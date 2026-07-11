@@ -89,9 +89,9 @@ def _contact_texts(
     limit: int | None = None,
     merge_gcs: bool = True,
 ) -> list[str]:
-    texts: list[str] = []
-    if not is_group:
-        texts = db.messages_for_contact(conn, handle, limit=limit, dm_only=True)
+    texts = db.messages_for_contact(
+        conn, handle, limit=limit, dm_only=not is_group
+    )
     if merge_gcs and gcs.gcs_configured():
         texts = gcs.merge_texts(texts, gcs.texts_for_handle(handle, limit=limit), limit=limit)
     return texts
